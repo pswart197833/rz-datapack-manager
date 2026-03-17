@@ -8,28 +8,46 @@
  * Also determines which data.001--.008 pack file a given asset belongs to
  * via a deterministic SDBM-style hash.
  *
- * The codec is stateless — all methods are pure functions of their inputs.
- *
- * Note: filenames in this format are flat — no directory structure.
- * Path separators do not appear in real pack filenames.
+ * Derived from KFileNameCipher.cpp in the original Rappelz game engine source.
  *
  * Algorithm summary:
- *   Decode: strip salt chars → swap two positions → substitution cipher → readable filename
- *   Encode: substitution cipher (forward) → swap two positions → wrap with salt chars
+ *
+ *   Encode:
+ *     1. Lowercase the filename
+ *     2. Compute start_depth = GetStartDepth(filename)
+ *        = (sum(17 * charCode + 1) + length) % 32, forced nonzero
+ *     3. Substitute each character forward through encTable, depth times,
+ *        advancing depth using the ORIGINAL char value after each step
+ *     4. Swap chars at positions [0]↔[66%] and [1]↔[33%] (transposition)
+ *     5. saltSuffix = refTable[start_depth]  — derived, not a parameter
+ *     6. saltPrefix = GetParityChar(inner)   — checksum of encoded inner bytes
+ *     7. Result = saltPrefix + inner + saltSuffix
+ *
+ *   Decode:
+ *     1. Find start_depth = refTable.indexOf(lastChar)
+ *     2. Strip saltPrefix and saltSuffix (first and last chars)
+ *     3. Reverse the transposition (same swap)
+ *     4. Substitute each character backward through decTable, depth times,
+ *        advancing depth using the DECODED char value after each step
+ *
+ *   Key insight:
+ *     The salt characters are DERIVED from the filename content — they are
+ *     not free parameters. encode(name) always produces exactly one encoded
+ *     string, so getPackId() is always deterministic without any salt storage.
  *
  * Performance:
- *   All substitution tables are precomputed at construction time.
- *   decode() uses a 85x256 lookup table that eliminates the inner substitution
- *   loop entirely, reducing parse time for 124k entries from ~10s to ~166ms.
+ *   encode() and decode() precompute per-call lookup tables for the
+ *   substitution stage, eliminating the inner depth loop.
  */
+
+const MAGIC_DEPTH = 32;
 
 class FilenameCodec {
 
     constructor() {
 
-        // xor2: Character substitution table.
-        // Encode uses direct index lookup; decode uses _reverseXor2 (precomputed below).
-        this._xor2 = new Uint8Array([
+        // encTable: forward substitution (KFileNameCipher.cpp encTable)
+        this._encTable = new Uint8Array([
             0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
             103,32,0,38,119,44,108,78,88,79,0,55,46,37,101,0,56,95,93,35,80,49,
             45,36,86,91,0,89,0,94,0,0,75,125,106,48,64,71,83,41,65,120,121,54,
@@ -38,103 +56,93 @@ class FilenameCodec {
             90,105,114,115,117,59,122,99,0,84,53,0
         ]);
 
-        // xor3: Seed table — determines the initial rolling key (num4) for each
-        // string based on its last (salt suffix) character.
-        this._xor3 = new Uint8Array([
-            94,38,84,95,78,115,100,123,120,111,53,118,96,114,79,89,86,43,44,105,
-            73,85,35,107,67,74,113,56,36,39,126,76,48,80,93,70,101,66,110,45,65,
-            117,40,112,88,72,90,104,119,68,121,50,125,97,103,87,71,55,75,61,98,
-            81,59,83,82,116,41,52,54,108,64,106,69,37,57,33,99,49,91,51,102,109,
-            77,122,0
+        // decTable: reverse substitution (KFileNameCipher.cpp decTable)
+        this._decTable = new Uint8Array([
+            0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+            33,100,0,51,55,45,35,98,90,71,0,95,37,54,44,0,67,53,87,112,88,126,
+            75,43,48,76,0,121,0,82,0,0,68,72,104,99,97,77,78,69,110,102,101,64,
+            113,89,39,41,52,111,83,70,125,105,56,80,40,59,116,57,0,50,61,49,
+            106,94,81,123,103,46,108,32,86,117,66,91,38,93,114,115,109,107,118,
+            119,85,120,84,36,73,74,122,79,0,65,96,0
         ]);
 
-        // reverseXor2[encodedChar] -> originalChar, or -1 if not mappable.
-        // Replaces xor2.indexOf() O(n) scan with O(1) array access.
-        this._reverseXor2 = new Int16Array(256).fill(-1);
-        for (let i = 0; i < this._xor2.length; i++) {
-            if (this._xor2[i] !== 0) this._reverseXor2[this._xor2[i]] = i;
-        }
+        // refTable: maps start_depth → saltSuffix, and provides parity alphabet
+        // (KFileNameCipher.cpp refTable)
+        this._refTable = "^&T_Nsd{xo5v`rOYV+,iIU#kCJq8$'~L0P]FeBn-Au(pXHZhwDy2}agWG7K=bQ;SRt)46l@jE%9!c1[3fmMz";
 
-        // reverseXor3[charCode] -> index in xor3, or -1 if not present.
-        // Replaces xor3.indexOf() with O(1) access for the seed lookup.
-        this._reverseXor3 = new Int16Array(256).fill(-1);
-        for (let i = 0; i < this._xor3.length; i++) {
-            this._reverseXor3[this._xor3[i]] = i;
-        }
-
-        // decodeTable[num4][charCode] -> decoded charCode after num4 reverse-substitutions.
-        // num4 ranges 0 to xor3.length-1 (0-84) for the first character of each string,
-        // then 1-32 for all subsequent characters.
-        // Precomputing this eliminates the inner j-loop entirely at decode time.
-        const TABLE_ROWS = this._xor3.length; // 85 rows
-        this._decodeTable = [];
-        for (let num4 = 0; num4 < TABLE_ROWS; num4++) {
-            const row = new Int16Array(256);
-            for (let charCode = 0; charCode < 256; charCode++) {
-                let num3 = charCode;
-                if (num3 < this._xor2.length && this._xor2[num3] !== 0) {
-                    for (let j = 0; j < num4; j++) {
-                        const n5 = this._reverseXor2[num3];
-                        if (n5 !== -1) num3 = n5;
-                    }
+        // Precompute encTable and decTable chains for all depths 1..MAGIC_DEPTH
+        // encChain[depth][c] = result of applying encTable 'depth' times to c
+        // decChain[depth][c] = result of applying decTable 'depth' times to c
+        this._encChain = [];
+        this._decChain = [];
+        for (let d = 0; d <= MAGIC_DEPTH; d++) {
+            const eRow = new Uint8Array(128);
+            const dRow = new Uint8Array(128);
+            for (let c = 0; c < 128; c++) {
+                let ev = c, dv = c;
+                for (let j = 0; j < d; j++) {
+                    ev = this._encTable[ev] || ev;
+                    dv = this._decTable[dv] || dv;
                 }
-                row[charCode] = num3 & 0xFFFF;
+                eRow[c] = ev;
+                dRow[c] = dv;
             }
-            this._decodeTable.push(row);
+            this._encChain.push(eRow);
+            this._decChain.push(dRow);
         }
-
-        // Shared scratch buffer for decode() — avoids a TypedArray allocation per call.
-        // Safe because filenames are short (< 256 chars) and all calls are synchronous.
-        this._scratch = new Uint16Array(256);
     }
 
     // ---------------------------------------------------------------------------
-    // Decode
+    // Private helpers
     // ---------------------------------------------------------------------------
 
     /**
-     * Decodes an obfuscated hash string from data.000 into a human-readable filename.
-     *
-     * @param {string} hash - The raw encoded string read from data.000 (latin1).
-     * @returns {string} The decoded filename e.g. "hero.dds"
+     * GetStartDepth from KFileNameCipher.cpp.
+     * Computes the initial substitution depth from the plaintext filename.
+     * @param {string} lower - Lowercased filename
+     * @returns {number} depth in range [1, MAGIC_DEPTH]
      */
-    decode(hash) {
-        if (!hash || hash.length === 0) return '';
-
-        const len = hash.length - 2; // strip salt prefix and suffix
-        if (len <= 0) return '';
-
-        // Load inner characters into shared scratch buffer
-        for (let i = 0; i < len; i++) {
-            this._scratch[i] = hash.charCodeAt(i + 1);
+    _getStartDepth(lower) {
+        let key = 0;
+        for (let i = 0; i < lower.length; i++) {
+            key += 17 * lower.charCodeAt(i) + 1;
         }
+        key += lower.length;
+        let ret = key % MAGIC_DEPTH;
+        if (ret === 0) ret = MAGIC_DEPTH;
+        return ret;
+    }
 
-        // Transposition — swap positions at 33% and 66% of string length
-        if (len > 4) {
-            const num  = Math.floor(0.3300000131130219 * len);
-            const num2 = Math.floor(0.6600000262260437 * len);
-            const c2   = this._scratch[num2];
-            const c    = this._scratch[num];
-            this._scratch[num2] = this._scratch[0];
-            this._scratch[num]  = this._scratch[1];
-            this._scratch[0]    = c2;
-            this._scratch[1]    = c;
+    /**
+     * GetParityChar from KFileNameCipher.cpp.
+     * Checksum of the encoded inner string bytes, mapped into refTable.
+     * @param {string} inner - Encoded inner string (no salt chars)
+     * @returns {string} single parity character
+     */
+    _getParityChar(inner) {
+        let key = 0;
+        for (let i = 0; i < inner.length; i++) {
+            key += inner.charCodeAt(i);
         }
+        return this._refTable[key % this._refTable.length];
+    }
 
-        // Seed the rolling key from the salt suffix character (last char of hash)
-        const lastCharByte = hash.charCodeAt(hash.length - 1);
-        let num4 = this._reverseXor3[lastCharByte] !== -1
-            ? this._reverseXor3[lastCharByte]
-            : 0;
-
-        // Substitution — O(1) per character via precomputed decode table
-        for (let i = 0; i < len; i++) {
-            const decoded        = this._decodeTable[num4][this._scratch[i]];
-            this._scratch[i]     = decoded;
-            num4                 = ((1 + num4 + 17 * decoded) & 31) || 32;
-        }
-
-        return String.fromCharCode.apply(null, this._scratch.subarray(0, len));
+    /**
+     * Transposition: swap [0]↔[66%] and [1]↔[33%].
+     * Same operation for both encode and decode (self-inverse).
+     * @param {string[]} arr
+     */
+    _swapChars(arr) {
+        if (arr.length <= 4) return;
+        const len  = arr.length;
+        const i66  = Math.floor(len * 0.66);
+        const i33  = Math.floor(len * 0.33);
+        const t0   = arr[0];
+        const t1   = arr[1];
+        arr[0]   = arr[i66];
+        arr[1]   = arr[i33];
+        arr[i66] = t0;
+        arr[i33] = t1;
     }
 
     // ---------------------------------------------------------------------------
@@ -142,57 +150,79 @@ class FilenameCodec {
     // ---------------------------------------------------------------------------
 
     /**
-     * Encodes a human-readable filename into the obfuscated hash format
-     * used in data.000. This is the exact inverse of decode().
+     * Encode a human-readable filename into the obfuscated format used in data.000.
      *
-     * @param {string} filename    - The decoded filename e.g. "hero.dds"
-     * @param {string} saltPrefix  - Salt character prepended to the result (default 'a')
-     * @param {string} saltSuffix  - Salt character appended to the result (default 'z')
-     * @returns {string} The encoded hash string ready for writing to data.000
+     * The salt characters are fully determined by the filename content —
+     * this function always produces exactly one output for a given input.
+     *
+     * @param {string} filename - Decoded filename e.g. 'hero.dds'
+     * @returns {string} Encoded string in latin1 encoding
      */
-    encode(filename, saltPrefix = 'a', saltSuffix = 'z') {
+    encode(filename) {
         if (!filename) return '';
 
-        let array = filename.split('');
+        const lower = filename.toLowerCase();
+        const arr   = lower.split('');
+        const len   = arr.length;
 
-        // Seed rolling key from salt suffix — same logic as decode
-        const suffixCharByte = saltSuffix.charCodeAt(0);
-        let num4 = this._reverseXor3[suffixCharByte] !== -1
-            ? this._reverseXor3[suffixCharByte]
-            : 0;
+        const startDepth = this._getStartDepth(lower);
+        let depth = startDepth;
 
-        for (let i = 0; i < array.length; i++) {
-            const originalCharByte = array[i].charCodeAt(0) & 0xFFFF;
-            let charToEncode       = originalCharByte;
+        for (let i = 0; i < len; i++) {
+            const c   = arr[i].charCodeAt(0);
+            arr[i]    = String.fromCharCode(this._encChain[depth][c] || c);
 
-            // Only substitute if this character has a valid mapping in xor2.
-            // Characters where xor2[char] === 0 pass through unchanged.
-            if (originalCharByte < this._xor2.length && this._xor2[originalCharByte] !== 0) {
-                for (let j = 0; j < num4; j++) {
-                    if (charToEncode < this._xor2.length) {
-                        charToEncode = this._xor2[charToEncode];
-                    }
-                }
-            }
-
-            // Advance rolling key using the ORIGINAL byte value (not the encoded one)
-            num4         = ((1 + num4 + 17 * originalCharByte) & 31) || 32;
-            array[i]     = String.fromCharCode(charToEncode & 0xFFFF);
+            // Advance depth using original char
+            depth = (depth + c * 17 + 1) % MAGIC_DEPTH;
+            if (depth === 0) depth = MAGIC_DEPTH;
         }
 
-        // Transposition — same swap as decode
-        if (array.length > 4) {
-            const num  = Math.floor(0.3300000131130219 * array.length);
-            const num2 = Math.floor(0.6600000262260437 * array.length);
-            const c0   = array[0];
-            const c1   = array[1];
-            array[0]    = array[num2];
-            array[1]    = array[num];
-            array[num2] = c0;
-            array[num]  = c1;
+        // Transposition
+        this._swapChars(arr);
+
+        const inner      = arr.join('');
+        const saltSuffix = this._refTable[startDepth];
+        const saltPrefix = this._getParityChar(inner);
+
+        return saltPrefix + inner + saltSuffix;
+    }
+
+    // ---------------------------------------------------------------------------
+    // Decode
+    // ---------------------------------------------------------------------------
+
+    /**
+     * Decode an obfuscated encoded string from data.000 into a human-readable filename.
+     *
+     * @param {string} hash - Encoded string in latin1 encoding
+     * @returns {string} Decoded filename e.g. 'hero.dds'
+     */
+    decode(hash) {
+        if (!hash || hash.length < 3) return '';
+
+        // Find start_depth from the salt suffix (last character)
+        const lastChar   = hash[hash.length - 1];
+        let depth = this._refTable.indexOf(lastChar);
+        if (depth <= 0) return '';
+
+        // Strip salt prefix and suffix
+        const arr = hash.slice(1, -1).split('');
+        const len = arr.length;
+
+        // Reverse transposition
+        this._swapChars(arr);
+
+        for (let i = 0; i < len; i++) {
+            const c   = arr[i].charCodeAt(0);
+            const dec = this._decChain[depth][c] || c;
+            arr[i]    = String.fromCharCode(dec);
+
+            // Advance depth using decoded char
+            depth = (depth + dec * 17 + 1) % MAGIC_DEPTH;
+            if (depth === 0) depth = MAGIC_DEPTH;
         }
 
-        return saltPrefix + array.join('') + saltSuffix;
+        return arr.join('');
     }
 
     // ---------------------------------------------------------------------------
@@ -200,14 +230,14 @@ class FilenameCodec {
     // ---------------------------------------------------------------------------
 
     /**
-     * Determines which data.001--.008 pack file contains a given asset.
-     * Uses a deterministic SDBM-style hash of the encoded filename string.
+     * Determine which data.001--.008 pack file contains a given asset.
+     * Uses a deterministic SDBM-style hash of the full encoded string.
      *
-     * @param {string} encodedHash - The raw encoded string from data.000 (latin1).
-     * @returns {number} Pack file slot — integer between 1 and 8 inclusive.
+     * @param {string} encodedStr - Full encoded string including salt chars (latin1)
+     * @returns {number} Pack file slot — integer 1 through 8 inclusive
      */
-    getPackId(encodedHash) {
-        const bytes = Buffer.from(encodedHash.toLowerCase(), 'latin1');
+    getPackId(encodedStr) {
+        const bytes = Buffer.from(encodedStr.toLowerCase(), 'latin1');
         let num = 0;
         for (let i = 0; i < bytes.length; i++) {
             num = (((num << 5) - num) + bytes[i]) | 0;

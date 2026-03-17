@@ -1,10 +1,10 @@
 List of item to address before tool is considered complete:
 
 [x] Fix warning in reconstruct test
-[ ] Fix progress bar breaking at 80%
+[x] Fix progress bar breaking at 80%
 [ ] Move config file out of the store directory
 [ ] configs should have defaults with the ability to change this.
-[ ] session should be in the session directory and not the store directory
+[x] session should be in the session directory and not the store directory
 [ ] Add store to compressed archive
 [ ] Create high level doc describing what the application does.
 [ ] Create a more detail doc describing the various aspects of the application and thier function

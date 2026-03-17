@@ -13,4 +13,4 @@ fingerprints.json
 # OS
 .DS_Store
 Thumbs.db
-*.kate-swap
+*.kate-swp

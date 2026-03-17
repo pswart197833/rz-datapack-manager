@@ -20,7 +20,10 @@
     "diagnose:packlist": "node test/diagnose-packlist.js",
     "diagnose:offsets": "node test/diagnose-offsets.js",
     "test:check-pack" : "node test/check-pack.js",
-    "diagnose:pipeline": "node test/diagnose-pipeline.js"
+    "diagnose:pipeline": "node test/diagnose-pipeline.js",
+    "diagnose:packid2": "node test/diagnose-packid-trace.js",
+    "diagnose:reference-codec": "node test/diagnose-reference-codec.js",
+    "diagnose:correct-codec" : "node test/diagnose-correct-codec.js"
   },
   "dependencies": {
     "cors": "^2.8.6",
