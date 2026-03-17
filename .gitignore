@@ -1,0 +1,16 @@
+node_modules/
+
+# Real game data files — never commit these
+data/
+
+# Generated output directories
+store/
+sessions/
+
+# JSON fingerprint store
+fingerprints.json
+
+# OS
+.DS_Store
+Thumbs.db
+*.kate-swap

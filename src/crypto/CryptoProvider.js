@@ -1,0 +1,110 @@
+'use strict';
+
+/**
+ * CryptoProvider
+ * src/crypto/CryptoProvider.js
+ *
+ * Concrete implementation of the rolling XOR stream cipher used to
+ * encrypt and decrypt data.000 index file content.
+ *
+ * The cipher is stateful — a rolling index (0-255) advances one step
+ * for every byte processed. The caller is responsible for maintaining
+ * this index across sequential read/write operations so the stream
+ * stays synchronised.
+ *
+ * All methods are stateless — the index is passed in and returned,
+ * never stored on the instance. This makes the cipher safe to use
+ * across multiple concurrent parse operations if needed.
+ */
+
+class CryptoProvider {
+
+    constructor() {
+
+        // xor1: Primary 256-byte table for the rolling XOR stream cipher.
+        // Each byte in the file is XORed against the table entry at the
+        // current rolling index position.
+        this._xor1 = new Uint8Array([
+            0x77, 0xE8, 0x5E, 0xEC, 0xB7, 0x4E, 0xC1, 0x87, 0x4F, 0xE6, 0xF5, 0x3C, 0x1F, 0xB3, 0x15, 0x43,
+            0x6A, 0x49, 0x30, 0xA6, 0xBF, 0x53, 0xA8, 0x35, 0x5B, 0xE5, 0x9E, 0x0E, 0x41, 0xEC, 0x22, 0xB8,
+            0xD4, 0x80, 0xA4, 0x8C, 0xCE, 0x65, 0x13, 0x1D, 0x4B, 0x08, 0x5A, 0x6A, 0xBB, 0x6F, 0xAD, 0x25,
+            0xB8, 0xDD, 0xCC, 0x77, 0x30, 0x74, 0xAC, 0x8C, 0x5A, 0x4A, 0x9A, 0x9B, 0x36, 0xBC, 0x53, 0x0A,
+            0x3C, 0xF8, 0x96, 0x0B, 0x5D, 0xAA, 0x28, 0xA9, 0xB2, 0x82, 0x13, 0x6E, 0xF1, 0xC1, 0x93, 0xA9,
+            0x9E, 0x5F, 0x20, 0xCF, 0xD4, 0xCC, 0x5B, 0x2E, 0x16, 0xF5, 0xC9, 0x4C, 0xB2, 0x1C, 0x57, 0xEE,
+            0x14, 0xED, 0xF9, 0x72, 0x97, 0x22, 0x1B, 0x4A, 0xA4, 0x2E, 0xB8, 0x96, 0xEF, 0x4B, 0x3F, 0x8E,
+            0xAB, 0x60, 0x5D, 0x7F, 0x2C, 0xB8, 0xAD, 0x43, 0xAD, 0x76, 0x8F, 0x5F, 0x92, 0xE6, 0x4E, 0xA7,
+            0xD4, 0x47, 0x19, 0x6B, 0x69, 0x34, 0xB5, 0x0E, 0x62, 0x6D, 0xA4, 0x52, 0xB9, 0xE3, 0xE0, 0x64,
+            0x43, 0x3D, 0xE3, 0x70, 0xF5, 0x90, 0xB3, 0xA2, 0x06, 0x42, 0x02, 0x98, 0x29, 0x50, 0x3F, 0xFD,
+            0x97, 0x58, 0x68, 0x01, 0x8C, 0x1E, 0x0F, 0xEF, 0x8B, 0xB3, 0x41, 0x44, 0x96, 0x21, 0xA8, 0xDA,
+            0x5E, 0x8B, 0x4A, 0x53, 0x1B, 0xFD, 0xF5, 0x21, 0x3F, 0xF7, 0xBA, 0x68, 0x47, 0xF9, 0x65, 0xDF,
+            0x52, 0xCE, 0xE0, 0xDE, 0xEC, 0xEF, 0xCD, 0x77, 0xA2, 0x0E, 0xBC, 0x38, 0x2F, 0x64, 0x12, 0x8D,
+            0xF0, 0x5C, 0xE0, 0x0B, 0x59, 0xD6, 0x2D, 0x99, 0xCD, 0xE7, 0x01, 0x15, 0xE0, 0x67, 0xF4, 0x32,
+            0x35, 0xD4, 0x11, 0x21, 0xC3, 0xDE, 0x98, 0x65, 0xED, 0x54, 0x9D, 0x1C, 0xB9, 0xB0, 0xAA, 0xA9,
+            0x0C, 0x8A, 0xB4, 0x66, 0x60, 0xE1, 0xFF, 0x2E, 0xC8, 0x00, 0x43, 0xA9, 0x67, 0x37, 0xDB, 0x9C
+        ]);
+    }
+
+    /**
+     * Decrypts (or encrypts) a single byte and advances the stream index.
+     * XOR is symmetric — the same operation both encrypts and decrypts.
+     *
+     * @param {number} byteValue  - The encrypted or plaintext byte to process.
+     * @param {number} index      - Current position (0-255) in the xor1 table.
+     * @returns {{ value: number, nextIndex: number }}
+     *   value     — the processed byte
+     *   nextIndex — the updated index to pass into the next call
+     */
+    processByte(byteValue, index) {
+        const value     = byteValue ^ this._xor1[index];
+        const nextIndex = (index + 1) % this._xor1.length;
+        return { value, nextIndex };
+    }
+
+    /**
+     * Decrypts (or encrypts) a buffer of bytes in-place and advances the
+     * stream index across the entire buffer.
+     *
+     * Modifies the buffer directly — the caller's slice is updated.
+     *
+     * @param {Buffer|Uint8Array} buffer - The bytes to process in-place.
+     * @param {number}            index  - Current stream index position.
+     * @returns {number} The updated index after processing all bytes.
+     */
+    processBuffer(buffer, index) {
+        for (let i = 0; i < buffer.length; i++) {
+            const result = this.processByte(buffer[i], index);
+            buffer[i]    = result.value;
+            index        = result.nextIndex;
+        }
+        return index;
+    }
+
+    /**
+     * Convenience wrapper — decrypt a buffer and return both the
+     * decrypted buffer and the updated stream index.
+     *
+     * @param {Buffer} buffer - Encrypted bytes (not modified — a copy is returned).
+     * @param {number} index  - Current stream index.
+     * @returns {{ buffer: Buffer, nextIndex: number }}
+     */
+    decrypt(buffer, index = 0) {
+        const copy = Buffer.from(buffer);
+        const nextIndex = this.processBuffer(copy, index);
+        return { buffer: copy, nextIndex };
+    }
+
+    /**
+     * Encrypt is identical to decrypt — XOR is its own inverse.
+     * Provided as a named alias for clarity at the call site.
+     *
+     * @param {Buffer} buffer - Plaintext bytes (not modified — a copy is returned).
+     * @param {number} index  - Current stream index.
+     * @returns {{ buffer: Buffer, nextIndex: number }}
+     */
+    encrypt(buffer, index = 0) {
+        return this.decrypt(buffer, index);
+    }
+
+}
+
+module.exports = CryptoProvider;

@@ -1,0 +1,33 @@
+{
+  "name": "datapack-manager",
+  "version": "1.0.0",
+  "description": "DataPack Manager — read, extract, and rebuild proprietary game archive files",
+  "main": "src/api/APIServer.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/api/APIServer.js",
+    "extract": "node scripts/extract-all.js",
+    "test:a": "node test/phase-a.js",
+    "test:b": "node test/phase-b.js",
+    "test:c": "node test/phase-c.js",
+    "test:d": "node test/phase-d.js",
+    "test:e": "node test/phase-e.js",
+    "test:f": "node test/phase-f.js",
+    "test:f2": "node test/phase-f2.js",
+    "test:reconstruct": "node test/test-reconstruct.js",
+    "analyze:dupes": "node scripts/analyze-duplicates.js --data ./data --store ./store",
+    "diagnose:packid": "node test/diagnose-packid.js",
+    "diagnose:packlist": "node test/diagnose-packlist.js",
+    "diagnose:offsets": "node test/diagnose-offsets.js",
+    "test:check-pack" : "node test/check-pack.js",
+    "diagnose:pipeline": "node test/diagnose-pipeline.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.6",
+    "express": "^4.22.1",
+    "uuid": "^9.0.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

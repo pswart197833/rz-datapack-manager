@@ -1,0 +1,966 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DataPack Manager</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+    <style>
+        :root {
+            --bg:#0d0f12;--bg-panel:#131619;--bg-card:#1a1e24;
+            --border:#252a32;--border-light:#2e3540;
+            --accent:#00e5a0;--accent-dim:#00b87d;--accent-glow:rgba(0,229,160,0.12);
+            --text:#e2e8f0;--text-muted:#64748b;--text-dim:#94a3b8;
+            --danger:#f43f5e;--warning:#f59e0b;--info:#38bdf8;--success:#4ade80;
+            --mono:'JetBrains Mono',monospace;--sans:'IBM Plex Sans',sans-serif;
+        }
+        *{box-sizing:border-box}
+        body{background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14px;min-height:100vh;margin:0}
+
+        /* Sidebar */
+        #sidebar{width:220px;min-height:100vh;background:var(--bg-panel);border-right:1px solid var(--border);position:fixed;top:0;left:0;display:flex;flex-direction:column;z-index:100}
+        .sidebar-logo{padding:20px 18px 16px;border-bottom:1px solid var(--border)}
+        .sidebar-logo .logo-mark{font-family:var(--mono);font-size:11px;font-weight:700;letter-spacing:.12em;color:var(--accent);text-transform:uppercase}
+        .sidebar-logo .logo-title{font-size:15px;font-weight:600;color:var(--text);margin-top:2px}
+        .nav-section{padding:12px 0 4px}
+        .nav-label{font-family:var(--mono);font-size:10px;font-weight:700;letter-spacing:.1em;color:var(--text-muted);text-transform:uppercase;padding:0 18px 6px}
+        .nav-item{display:flex;align-items:center;gap:10px;padding:8px 18px;color:var(--text-dim);cursor:pointer;transition:all .15s;border-left:2px solid transparent;font-size:13.5px}
+        .nav-item:hover{color:var(--text);background:rgba(255,255,255,.03)}
+        .nav-item.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-glow)}
+        .nav-item i{width:16px;font-size:14px}
+        .sidebar-status{margin-top:auto;padding:14px 18px;border-top:1px solid var(--border);font-family:var(--mono);font-size:11px;color:var(--text-muted)}
+        .status-dot{width:7px;height:7px;border-radius:50%;display:inline-block;margin-right:6px}
+        .status-dot.ok{background:var(--accent);box-shadow:0 0 6px var(--accent)}
+        .status-dot.error{background:var(--danger)}
+        .status-dot.idle{background:var(--text-muted)}
+        .status-dot.busy{background:var(--warning);animation:pulse 1s infinite}
+        @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+
+        /* Main */
+        #main{margin-left:220px;padding:0;min-height:100vh}
+        .topbar{height:52px;background:var(--bg-panel);border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 24px;gap:12px;position:sticky;top:0;z-index:50}
+        .topbar-title{font-size:14px;font-weight:600;color:var(--text)}
+        .topbar-meta{font-family:var(--mono);font-size:11px;color:var(--text-muted)}
+        .page{display:none;padding:24px}
+        .page.active{display:block}
+
+        /* Cards */
+        .card-panel{background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:20px;margin-bottom:16px}
+        .card-panel h6{font-family:var(--mono);font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--accent);margin-bottom:14px}
+
+        /* Stats */
+        .stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px;margin-bottom:20px}
+        .stat-box{background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:16px}
+        .stat-label{font-family:var(--mono);font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--text-muted);margin-bottom:6px}
+        .stat-value{font-family:var(--mono);font-size:22px;font-weight:700;color:var(--accent);line-height:1}
+
+        /* Table */
+        .asset-table-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:8px}
+        table.asset-table{width:100%;border-collapse:collapse;font-size:13px}
+        table.asset-table thead th{background:var(--bg-panel);color:var(--text-muted);font-family:var(--mono);font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;padding:10px 14px;border-bottom:1px solid var(--border);white-space:nowrap}
+        table.asset-table tbody tr{border-bottom:1px solid var(--border);transition:background .1s}
+        table.asset-table tbody tr:last-child{border-bottom:none}
+        table.asset-table tbody tr:hover{background:rgba(255,255,255,.025)}
+        table.asset-table td{padding:9px 14px;color:var(--text-dim);vertical-align:middle}
+        .td-name{font-family:var(--mono);font-size:12px;color:var(--text);max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        .td-mono{font-family:var(--mono);font-size:11px}
+
+        /* Type badges */
+        .type-badge{font-family:var(--mono);font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;padding:2px 7px;border-radius:4px;display:inline-block}
+        .type-dds,.type-tga,.type-bmp,.type-png,.type-jpg{background:#1e2a3a;color:#60a5fa}
+        .type-naf,.type-cob,.type-nx3,.type-nfm{background:#2a1e3a;color:#a78bfa}
+        .type-wav,.type-mp3{background:#1e2e2a;color:#34d399}
+        .type-xml,.type-lua,.type-cfg,.type-txt,.type-spt,.type-nui{background:#2a2a1e;color:#fcd34d}
+        .type-default{background:#1e2428;color:var(--text-muted)}
+
+        /* Filter bar */
+        .filter-bar{display:flex;gap:10px;align-items:center;margin-bottom:14px;flex-wrap:wrap}
+        .filter-input{background:var(--bg-panel);border:1px solid var(--border-light);border-radius:6px;color:var(--text);padding:7px 12px;font-family:var(--mono);font-size:12px;outline:none;transition:border-color .15s}
+        .filter-input:focus{border-color:var(--accent)}
+        .filter-input::placeholder{color:var(--text-muted)}
+        .filter-input.wide{flex:1;min-width:200px}
+        select.filter-input option{background:var(--bg-card)}
+
+        /* Pagination */
+        .pagination-bar{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;background:var(--bg-panel);border-top:1px solid var(--border);font-family:var(--mono);font-size:11px;color:var(--text-muted);border-radius:0 0 8px 8px}
+        .pag-btn{background:var(--bg-card);border:1px solid var(--border-light);border-radius:5px;color:var(--text-dim);padding:4px 10px;cursor:pointer;font-family:var(--mono);font-size:11px;transition:all .15s}
+        .pag-btn:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
+        .pag-btn:disabled{opacity:.35;cursor:default}
+
+        /* Buttons */
+        .btn-accent{background:var(--accent);color:#0a0f0a;border:none;border-radius:6px;padding:7px 16px;font-family:var(--mono);font-size:12px;font-weight:700;letter-spacing:.04em;cursor:pointer;transition:all .15s;white-space:nowrap}
+        .btn-accent:hover{background:var(--accent-dim);box-shadow:0 0 12px var(--accent-glow)}
+        .btn-accent:disabled{opacity:.5;cursor:default}
+        .btn-ghost{background:transparent;color:var(--text-dim);border:1px solid var(--border-light);border-radius:6px;padding:7px 14px;font-family:var(--mono);font-size:12px;cursor:pointer;transition:all .15s;white-space:nowrap}
+        .btn-ghost:hover{border-color:var(--accent);color:var(--accent)}
+        .btn-danger{background:transparent;color:var(--danger);border:1px solid rgba(244,63,94,.3);border-radius:6px;padding:7px 14px;font-family:var(--mono);font-size:12px;cursor:pointer;transition:all .15s;white-space:nowrap}
+        .btn-danger:hover{background:rgba(244,63,94,.1)}
+
+        /* Form */
+        .form-field{margin-bottom:14px}
+        .form-label{display:block;font-family:var(--mono);font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted);margin-bottom:6px}
+        .form-control-dark{width:100%;background:var(--bg-panel);border:1px solid var(--border-light);border-radius:6px;color:var(--text);padding:8px 12px;font-family:var(--mono);font-size:12px;outline:none;transition:border-color .15s}
+        .form-control-dark:focus{border-color:var(--accent)}
+
+        /* Progress bar */
+        .progress-wrap{background:var(--bg-panel);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:16px}
+        .progress-track{background:var(--border);border-radius:4px;height:8px;overflow:hidden;margin:10px 0}
+        .progress-fill{background:var(--accent);height:100%;border-radius:4px;transition:width .3s ease;box-shadow:0 0 8px var(--accent-glow)}
+        .progress-meta{font-family:var(--mono);font-size:11px;color:var(--text-muted);display:flex;justify-content:space-between;margin-top:6px}
+
+        /* Session cards */
+        .session-card{background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:10px;display:flex;align-items:center;gap:16px;transition:border-color .15s}
+        .session-card:hover{border-color:var(--border-light)}
+        .session-status-badge{font-family:var(--mono);font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;padding:3px 8px;border-radius:4px;white-space:nowrap}
+        .status-active{background:#1e2e2a;color:var(--accent)}
+        .status-ready{background:#1e2840;color:var(--info)}
+        .status-committed{background:#1e2e28;color:var(--success)}
+        .status-interrupted{background:#2e2014;color:var(--warning)}
+        .status-discarded{background:#2e1e1e;color:var(--text-muted)}
+        .status-building,.status-finalising{background:#2e2814;color:var(--warning)}
+
+        /* Staged file table */
+        .staged-file-row{display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--border);font-family:var(--mono);font-size:12px}
+        .staged-file-row:last-child{border-bottom:none}
+        .staged-cat{padding:2px 6px;border-radius:3px;font-size:10px;font-weight:700;text-transform:uppercase}
+        .cat-new{background:#1e2e2a;color:var(--accent)}
+        .cat-in-store{background:#1e2840;color:var(--info)}
+        .cat-deleted{background:#2e1e1e;color:var(--text-muted);text-decoration:line-through}
+
+        /* Toast */
+        #toast-container{position:fixed;bottom:24px;right:24px;z-index:9999;display:flex;flex-direction:column;gap:8px}
+        .toast-msg{background:var(--bg-card);border:1px solid var(--border-light);border-radius:8px;padding:12px 16px;font-family:var(--mono);font-size:12px;color:var(--text);min-width:260px;animation:slideIn .2s ease;border-left:3px solid var(--accent)}
+        .toast-msg.error{border-left-color:var(--danger)}
+        .toast-msg.warn{border-left-color:var(--warning)}
+        @keyframes slideIn{from{transform:translateX(20px);opacity:0}to{transform:translateX(0);opacity:1}}
+
+        /* Config */
+        .config-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+        @media(max-width:900px){.config-grid{grid-template-columns:1fr}}
+
+        /* Misc */
+        .loading-shimmer{background:linear-gradient(90deg,var(--bg-card) 25%,var(--border) 50%,var(--bg-card) 75%);background-size:200% 100%;animation:shimmer 1.5s infinite;border-radius:4px;height:14px}
+        @keyframes shimmer{to{background-position:-200% 0}}
+        .empty-state{text-align:center;padding:48px 24px;color:var(--text-muted)}
+        .empty-state i{font-size:32px;margin-bottom:12px;display:block}
+        .empty-state p{font-size:13px;margin:0}
+        .section-actions{display:flex;gap:8px;align-items:center;margin-bottom:16px;flex-wrap:wrap}
+    </style>
+</head>
+<body>
+
+<div id="sidebar">
+    <div class="sidebar-logo">
+        <div class="logo-mark">DataPack</div>
+        <div class="logo-title">Pack Manager</div>
+    </div>
+    <div class="nav-section">
+        <div class="nav-label">Browse</div>
+        <div class="nav-item active" data-page="assets" onclick="showPage('assets')">
+            <i class="bi bi-grid-3x3-gap"></i> Assets
+        </div>
+    </div>
+    <div class="nav-section">
+        <div class="nav-label">Tools</div>
+        <div class="nav-item" data-page="archiver" onclick="showPage('archiver')">
+            <i class="bi bi-archive"></i> Archiver
+        </div>
+        <div class="nav-item" data-page="modder" onclick="showPage('modder')">
+            <i class="bi bi-pencil-square"></i> Modder
+        </div>
+    </div>
+    <div class="nav-section">
+        <div class="nav-label">System</div>
+        <div class="nav-item" data-page="config" onclick="showPage('config')">
+            <i class="bi bi-sliders"></i> Configuration
+        </div>
+    </div>
+    <div class="sidebar-status" id="sidebar-status">
+        <span class="status-dot idle" id="status-dot"></span>
+        <span id="status-text">Not configured</span>
+    </div>
+</div>
+
+<div id="main">
+    <div class="topbar">
+        <span class="topbar-title" id="topbar-title">Assets</span>
+        <span class="topbar-meta" id="topbar-meta" style="margin-left:auto"></span>
+        <button class="btn-ghost" onclick="exportCSV()" id="btn-export" style="display:none">
+            <i class="bi bi-download"></i> CSV
+        </button>
+    </div>
+
+    <!-- ================================================================ Assets -->
+    <div class="page active" id="page-assets">
+        <div class="stat-grid" id="stat-grid"></div>
+        <div class="filter-bar">
+            <input type="text" class="filter-input wide" id="search-input"
+                placeholder="Search filenames..." oninput="debounceSearch()">
+            <select class="filter-input" id="type-filter" onchange="loadEntries(1)">
+                <option value="">All types</option>
+                <option value="dds">DDS</option><option value="jpg">JPG</option>
+                <option value="bmp">BMP</option><option value="tga">TGA</option>
+                <option value="png">PNG</option><option value="naf">NAF</option>
+                <option value="nx3">NX3</option><option value="cob">COB</option>
+                <option value="nfm">NFM</option><option value="wav">WAV</option>
+                <option value="xml">XML</option><option value="cfg">CFG</option>
+                <option value="lua">LUA</option><option value="spt">SPT</option>
+            </select>
+            <select class="filter-input" id="pack-filter" onchange="loadEntries(1)">
+                <option value="">All packs</option>
+                <option value="1">data.001</option><option value="2">data.002</option>
+                <option value="3">data.003</option><option value="4">data.004</option>
+                <option value="5">data.005</option><option value="6">data.006</option>
+                <option value="7">data.007</option><option value="8">data.008</option>
+            </select>
+            <select class="filter-input" id="sort-select" onchange="loadEntries(1)">
+                <option value="decodedName">Name ↑</option>
+                <option value="decodedName_desc">Name ↓</option>
+                <option value="size_desc">Size ↓</option>
+                <option value="size">Size ↑</option>
+                <option value="packId">Pack</option>
+            </select>
+        </div>
+        <div class="asset-table-wrap">
+            <table class="asset-table">
+                <thead><tr>
+                    <th>Filename</th><th>Type</th><th>Pack</th><th>Size</th><th>Offset</th>
+                </tr></thead>
+                <tbody id="asset-tbody">
+                    <tr><td colspan="5">
+                        <div class="empty-state">
+                            <i class="bi bi-database-slash"></i>
+                            <p>Configure a data directory to browse assets</p>
+                        </div>
+                    </td></tr>
+                </tbody>
+            </table>
+            <div class="pagination-bar" id="pagination-bar" style="display:none">
+                <span id="pag-info"></span>
+                <div style="display:flex;gap:6px;align-items:center">
+                    <button class="pag-btn" id="btn-prev" onclick="loadEntries(currentPage-1)">← Prev</button>
+                    <span id="pag-pages" style="min-width:80px;text-align:center"></span>
+                    <button class="pag-btn" id="btn-next" onclick="loadEntries(currentPage+1)">Next →</button>
+                    <select class="filter-input" id="page-size-select" onchange="loadEntries(1)" style="padding:4px 8px">
+                        <option value="50">50</option>
+                        <option value="100">100</option>
+                        <option value="250">250</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ================================================================ Archiver -->
+    <div class="page" id="page-archiver">
+        <div class="card-panel">
+            <h6>Extract All Assets to Store</h6>
+            <p style="color:var(--text-dim);font-size:13px;margin-bottom:16px">
+                Extract all assets from the loaded pack files into the content-addressed store.
+                Already-stored assets are skipped automatically — safe to run across multiple versions to build up your archive.
+            </p>
+            <div class="filter-bar" style="margin-bottom:16px">
+                <div>
+                    <label class="form-label" style="margin-bottom:4px">Filter by type (optional)</label>
+                    <input type="text" class="filter-input" id="extract-types"
+                        placeholder="e.g. dds,tga,bmp  (blank = all)" style="width:260px">
+                </div>
+            </div>
+            <div style="display:flex;gap:8px">
+                <button class="btn-accent" id="btn-extract" onclick="startExtraction()">
+                    <i class="bi bi-download"></i> Extract All
+                </button>
+                <button class="btn-ghost" onclick="checkExtractionStatus()">
+                    <i class="bi bi-arrow-clockwise"></i> Refresh Status
+                </button>
+            </div>
+        </div>
+
+        <!-- Progress -->
+        <div class="progress-wrap" id="extract-progress" style="display:none">
+            <div style="display:flex;justify-content:space-between;align-items:center">
+                <span style="font-family:var(--mono);font-size:12px;color:var(--text)">
+                    <span id="extract-status-label">Extracting...</span>
+                </span>
+                <span style="font-family:var(--mono);font-size:12px;color:var(--accent)" id="extract-pct">0%</span>
+            </div>
+            <div class="progress-track">
+                <div class="progress-fill" id="extract-bar" style="width:0%"></div>
+            </div>
+            <div class="progress-meta">
+                <span id="extract-counts">0 / 0</span>
+                <span id="extract-file" style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right"></span>
+            </div>
+        </div>
+
+        <!-- Result -->
+        <div class="card-panel" id="extract-result" style="display:none">
+            <h6>Last Extraction Result</h6>
+            <div id="extract-result-body"></div>
+        </div>
+    </div>
+
+    <!-- ================================================================ Modder -->
+    <div class="page" id="page-modder">
+        <!-- Step 1: Choose session -->
+        <div id="modder-step-choose">
+            <div class="section-actions">
+                <button class="btn-accent" onclick="showModderCreate()">
+                    <i class="bi bi-plus"></i> New Session (Builder)
+                </button>
+                <button class="btn-ghost" onclick="showModderBlueprint()">
+                    <i class="bi bi-diagram-3"></i> Open From Blueprint (Modder)
+                </button>
+                <button class="btn-ghost" onclick="loadModderSessions()">
+                    <i class="bi bi-arrow-clockwise"></i> Refresh
+                </button>
+            </div>
+
+            <!-- New session form -->
+            <div class="card-panel" id="modder-create-form" style="display:none">
+                <h6>New Empty Session</h6>
+                <div class="form-field">
+                    <label class="form-label">Label</label>
+                    <input type="text" class="form-control-dark" id="new-session-label" placeholder="e.g. My custom pack">
+                </div>
+                <div style="display:flex;gap:8px">
+                    <button class="btn-accent" onclick="createModderSession()">Create</button>
+                    <button class="btn-ghost" onclick="document.getElementById('modder-create-form').style.display='none'">Cancel</button>
+                </div>
+            </div>
+
+            <!-- From blueprint form -->
+            <div class="card-panel" id="modder-blueprint-form" style="display:none">
+                <h6>Open From Blueprint</h6>
+                <p style="color:var(--text-dim);font-size:12px;margin-bottom:12px">
+                    Opens an existing pack for modification. All assets are pre-loaded as in-store entries.
+                </p>
+                <div class="form-field">
+                    <label class="form-label">Available Blueprints</label>
+                    <select class="form-control-dark" id="blueprint-select">
+                        <option value="">Loading...</option>
+                    </select>
+                </div>
+                <div class="form-field">
+                    <label class="form-label">Session Label (optional)</label>
+                    <input type="text" class="form-control-dark" id="bp-session-label" placeholder="e.g. Patch 8.1 modifications">
+                </div>
+                <div style="display:flex;gap:8px">
+                    <button class="btn-accent" onclick="createBlueprintSession()">Open</button>
+                    <button class="btn-ghost" onclick="document.getElementById('modder-blueprint-form').style.display='none'">Cancel</button>
+                </div>
+            </div>
+
+            <!-- Sessions list -->
+            <div id="modder-sessions-list"></div>
+        </div>
+
+        <!-- Step 2: Active session detail -->
+        <div id="modder-step-detail" style="display:none">
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+                <button class="btn-ghost" onclick="closeSessionDetail()">
+                    <i class="bi bi-arrow-left"></i> Back
+                </button>
+                <div>
+                    <div style="font-weight:600" id="detail-session-label"></div>
+                    <div style="font-family:var(--mono);font-size:11px;color:var(--text-muted)" id="detail-session-meta"></div>
+                </div>
+                <span class="session-status-badge" id="detail-status-badge" style="margin-left:auto"></span>
+            </div>
+
+            <!-- Add file form -->
+            <div class="card-panel" id="detail-add-form" style="display:none">
+                <h6>Add / Replace File</h6>
+                <div class="config-grid">
+                    <div class="form-field">
+                        <label class="form-label">Source File Path (on server)</label>
+                        <input type="text" class="form-control-dark" id="add-source-path" placeholder="/absolute/path/to/file.dds">
+                    </div>
+                    <div class="form-field">
+                        <label class="form-label">Target Filename in Pack</label>
+                        <input type="text" class="form-control-dark" id="add-target-name" placeholder="hero.dds">
+                    </div>
+                </div>
+                <div style="display:flex;gap:8px">
+                    <button class="btn-accent" onclick="addFileToSession()">Add File</button>
+                    <button class="btn-ghost" onclick="document.getElementById('detail-add-form').style.display='none'">Cancel</button>
+                </div>
+            </div>
+
+            <!-- Session actions -->
+            <div class="card-panel">
+                <h6>Actions</h6>
+                <div style="display:flex;gap:8px;flex-wrap:wrap">
+                    <button class="btn-ghost" onclick="document.getElementById('detail-add-form').style.display=''">
+                        <i class="bi bi-plus-circle"></i> Add File
+                    </button>
+                    <button class="btn-ghost" id="btn-prepare" onclick="prepareActiveSession()">
+                        <i class="bi bi-check2-circle"></i> Prepare
+                    </button>
+                    <button class="btn-accent" id="btn-commit" onclick="commitActiveSession()" style="display:none">
+                        <i class="bi bi-send"></i> Commit Pack
+                    </button>
+                    <button class="btn-ghost" onclick="loadSessionDetail(activeSessionId)">
+                        <i class="bi bi-arrow-clockwise"></i> Refresh
+                    </button>
+                    <button class="btn-danger" onclick="discardActiveSession()">
+                        <i class="bi bi-trash"></i> Discard
+                    </button>
+                </div>
+            </div>
+
+            <!-- Staged files -->
+            <div class="card-panel">
+                <h6>Staged Files (<span id="detail-file-count">0</span>)</h6>
+                <div class="filter-bar" style="margin-bottom:10px">
+                    <select class="filter-input" id="staged-cat-filter" onchange="renderStagedFiles()">
+                        <option value="">All</option>
+                        <option value="new">New</option>
+                        <option value="in-store">In Store</option>
+                        <option value="deleted">Deleted</option>
+                    </select>
+                    <input type="text" class="filter-input wide" id="staged-search"
+                        placeholder="Search staged files..." oninput="renderStagedFiles()">
+                </div>
+                <div id="staged-files-list" style="max-height:400px;overflow-y:auto;border:1px solid var(--border);border-radius:6px"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ================================================================ Config -->
+    <div class="page" id="page-config">
+        <div class="card-panel">
+            <h6>Pack File Paths</h6>
+            <div class="config-grid">
+                <div class="form-field">
+                    <label class="form-label">Index File (data.000)</label>
+                    <input type="text" class="form-control-dark" id="cfg-index" placeholder="/path/to/data/data.000">
+                </div>
+                <div class="form-field">
+                    <label class="form-label">Configuration Label</label>
+                    <input type="text" class="form-control-dark" id="cfg-label" placeholder="Game v8.1">
+                </div>
+            </div>
+            <div class="config-grid">
+                <div class="form-field">
+                    <label class="form-label">Asset Store Directory</label>
+                    <input type="text" class="form-control-dark" id="cfg-store" placeholder="/path/to/store">
+                </div>
+                <div class="form-field">
+                    <label class="form-label">Sessions Directory</label>
+                    <input type="text" class="form-control-dark" id="cfg-sessions" placeholder="/path/to/sessions">
+                </div>
+            </div>
+            <div id="pack-paths-grid" class="config-grid" style="margin-bottom:14px"></div>
+            <button class="btn-accent" onclick="saveConfig()"><i class="bi bi-check2"></i> Save Configuration</button>
+        </div>
+        <div class="card-panel" id="config-status-card" style="display:none">
+            <h6>Current Configuration</h6>
+            <pre id="config-display" style="font-family:var(--mono);font-size:11px;color:var(--text-dim);margin:0;white-space:pre-wrap;overflow:auto;max-height:300px"></pre>
+        </div>
+    </div>
+</div>
+
+<div id="toast-container"></div>
+
+<script>
+// ============================================================
+// AssetTableView
+// ============================================================
+class AssetTableView {
+    constructor() {
+        this.entries=[];this.filters={search:'',type:'',packId:''};
+        this.sort={column:'decodedName',dir:'asc'};this.page=1;this.pageSize=50;
+    }
+    applyFilter(col,val){this.filters[col]=val;this.page=1}
+    clearFilters(){this.filters={search:'',type:'',packId:''};this.page=1}
+    setSort(col,dir){this.sort={column:col,dir}}
+    getPage(){return this.entries}
+    exportCSV(){
+        const h='decodedName,assetType,packId,offset,size';
+        const r=this.entries.map(e=>`${e.decodedName},${e.assetType},data.00${e.packId},${e.offset},${e.size}`);
+        return[h,...r].join('\n')
+    }
+    exportJSON(){return JSON.stringify(this.entries,null,2)}
+    computedColumns(e){return{
+        sizeKb:(e.size/1024).toFixed(1)+' KB',
+        packLabel:'data.00'+e.packId,
+        assetType:e.assetType||e.decodedName.split('.').pop().toLowerCase()
+    }}
+}
+
+// ============================================================
+// State
+// ============================================================
+const API='';  // same origin
+const view=new AssetTableView();
+let currentPage=1,totalPages=1,searchTimer=null;
+let extractPollTimer=null;
+let activeSessionId=null;
+let activeSessionFiles=[];
+
+// ============================================================
+// Helpers
+// ============================================================
+async function api(method,p,body){
+    const opts={method,headers:{'Content-Type':'application/json'}};
+    if(body)opts.body=JSON.stringify(body);
+    const res=await fetch('/api'+p,opts);
+    if(!res.ok){const e=await res.json().catch(()=>({error:res.statusText}));throw new Error(e.error||res.statusText)}
+    return res.json()
+}
+function toast(msg,type='ok'){
+    const el=document.createElement('div');
+    el.className='toast-msg'+(type==='error'?' error':type==='warn'?' warn':'');
+    el.textContent=msg;
+    document.getElementById('toast-container').appendChild(el);
+    setTimeout(()=>el.remove(),3500)
+}
+function setStatus(state,text){
+    document.getElementById('status-dot').className='status-dot '+state;
+    document.getElementById('status-text').textContent=text
+}
+function fmt(n){return n.toLocaleString()}
+function fmtBytes(b){if(b<1024)return b+' B';if(b<1048576)return(b/1024).toFixed(1)+' KB';return(b/1048576).toFixed(1)+' MB'}
+
+// ============================================================
+// Navigation
+// ============================================================
+function showPage(name){
+    document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+    document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+    document.getElementById('page-'+name).classList.add('active');
+    document.querySelector('[data-page="'+name+'"]').classList.add('active');
+    const titles={assets:'Assets',archiver:'Archiver — Extract to Store',modder:'Modder / Builder',config:'Configuration'};
+    document.getElementById('topbar-title').textContent=titles[name]||name;
+    document.getElementById('btn-export').style.display=name==='assets'?'':'none';
+    if(name==='assets')loadEntries(1);
+    if(name==='archiver'){checkExtractionStatus();loadEntries(1)}
+    if(name==='modder'){loadModderSessions();loadBlueprints()}
+    if(name==='config')loadConfig()
+}
+
+// ============================================================
+// Assets page
+// ============================================================
+function debounceSearch(){clearTimeout(searchTimer);searchTimer=setTimeout(()=>loadEntries(1),300)}
+
+async function loadEntries(page=1){
+    currentPage=page;
+    const search=document.getElementById('search-input').value;
+    const type=document.getElementById('type-filter').value;
+    const packId=document.getElementById('pack-filter').value;
+    const sortRaw=document.getElementById('sort-select').value;
+    const pageSize=document.getElementById('page-size-select').value;
+    const[sortBy,sortDir]=sortRaw.includes('_desc')?[sortRaw.replace('_desc',''),'desc']:[sortRaw,'asc'];
+    const params=new URLSearchParams({page,pageSize,sortBy,sortDir});
+    if(search)params.set('search',search);
+    if(type)params.set('type',type);
+    if(packId)params.set('packId',packId);
+    const tbody=document.getElementById('asset-tbody');
+    tbody.innerHTML='<tr><td colspan="5" style="padding:20px"><div class="loading-shimmer" style="width:60%;margin:0 auto"></div></td></tr>';
+    try{
+        const result=await api('GET','/entries?'+params);
+        view.entries=result.entries;
+        totalPages=result.totalPages;
+        renderTable(result);renderStats(result);renderPagination(result);
+        setStatus('ok',fmt(result.total)+' assets');
+        document.getElementById('topbar-meta').textContent=fmt(result.total)+' entries';
+    }catch(err){
+        tbody.innerHTML='<tr><td colspan="5"><div class="empty-state"><i class="bi bi-exclamation-circle"></i><p>'+err.message+'</p></div></td></tr>';
+        setStatus('error','Load failed')
+    }
+}
+
+function renderTable(result){
+    const tbody=document.getElementById('asset-tbody');
+    if(!result.entries||result.entries.length===0){
+        tbody.innerHTML='<tr><td colspan="5"><div class="empty-state"><i class="bi bi-search"></i><p>No assets match</p></div></td></tr>';
+        return
+    }
+    tbody.innerHTML=result.entries.map(e=>{
+        const c=view.computedColumns(e);
+        return`<tr>
+            <td class="td-name" title="${e.decodedName}">${e.decodedName}</td>
+            <td><span class="type-badge type-${c.assetType} type-default">${c.assetType}</span></td>
+            <td class="td-mono">${c.packLabel}</td>
+            <td class="td-mono">${c.sizeKb}</td>
+            <td class="td-mono">${e.offset.toLocaleString()}</td>
+        </tr>`}).join('')
+}
+
+function renderStats(result){
+    if(!result.total)return;
+    document.getElementById('stat-grid').innerHTML=`
+        <div class="stat-box"><div class="stat-label">Total Assets</div><div class="stat-value">${fmt(result.total)}</div></div>
+        <div class="stat-box"><div class="stat-label">Page</div><div class="stat-value">${result.page} / ${result.totalPages}</div></div>`
+}
+
+function renderPagination(result){
+    const bar=document.getElementById('pagination-bar');
+    bar.style.display=result.totalPages>1?'':'none';
+    const ps=Number(document.getElementById('page-size-select').value);
+    document.getElementById('pag-info').textContent=`${(result.page-1)*ps+1}–${Math.min(result.page*ps,result.total)} of ${fmt(result.total)}`;
+    document.getElementById('pag-pages').textContent=`${result.page} / ${result.totalPages}`;
+    document.getElementById('btn-prev').disabled=result.page<=1;
+    document.getElementById('btn-next').disabled=result.page>=result.totalPages
+}
+
+async function exportCSV(){
+    const search=document.getElementById('search-input').value;
+    const type=document.getElementById('type-filter').value;
+    const params=new URLSearchParams({pageSize:999999});
+    if(search)params.set('search',search);if(type)params.set('type',type);
+    const a=document.createElement('a');
+    a.href='/api/export/csv?'+params;a.download='assets.csv';a.click();
+    toast('CSV export started')
+}
+
+// ============================================================
+// Archiver page
+// ============================================================
+async function startExtraction(){
+    const typesRaw=document.getElementById('extract-types').value.trim();
+    const types=typesRaw?typesRaw.split(',').map(t=>t.trim()).filter(Boolean):undefined;
+    try{
+        const job=await api('POST','/extract',{types});
+        document.getElementById('extract-progress').style.display='';
+        document.getElementById('extract-result').style.display='none';
+        document.getElementById('btn-extract').disabled=true;
+        setStatus('busy','Extracting...');
+        startExtractionPoll()
+    }catch(err){toast(err.message,'error')}
+}
+
+function startExtractionPoll(){
+    clearInterval(extractPollTimer);
+    extractPollTimer=setInterval(checkExtractionStatus,800)
+}
+
+async function checkExtractionStatus(){
+    try{
+        const job=await api('GET','/extract/status');
+        if(job.status==='idle'){
+            clearInterval(extractPollTimer);
+            document.getElementById('extract-progress').style.display='none';
+            document.getElementById('btn-extract').disabled=false;
+            return
+        }
+        // Show progress
+        document.getElementById('extract-progress').style.display='';
+        const pct=job.percent||0;
+        document.getElementById('extract-bar').style.width=pct+'%';
+        document.getElementById('extract-pct').textContent=pct+'%';
+        document.getElementById('extract-counts').textContent=
+            fmt(job.done||0)+' / '+fmt(job.total||0)+
+            '  (+'+fmt(job.extracted||0)+' new, ~'+fmt(job.skipped||0)+' skip)';
+        const f=job.currentFile||'';
+        document.getElementById('extract-file').textContent=f.length>40?'...'+f.slice(-37):f;
+
+        if(job.status==='running'){
+            document.getElementById('extract-status-label').textContent='Extracting...';
+            setStatus('busy','Extracting '+pct+'%')
+        }else if(job.status==='complete'||job.status==='error'){
+            clearInterval(extractPollTimer);
+            document.getElementById('btn-extract').disabled=false;
+            setStatus(job.status==='complete'?'ok':'error',job.status==='complete'?'Complete':'Error');
+            showExtractionResult(job)
+        }
+    }catch(err){
+        clearInterval(extractPollTimer);
+        document.getElementById('btn-extract').disabled=false
+    }
+}
+
+function showExtractionResult(job){
+    const card=document.getElementById('extract-result');
+    card.style.display='';
+    const ok=job.status==='complete';
+    document.getElementById('extract-result-body').innerHTML=`
+        <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:12px">
+            <div><div class="stat-label">Status</div>
+                <span style="font-family:var(--mono);font-size:14px;font-weight:700;color:${ok?'var(--success)':'var(--danger)'}">
+                    ${job.status.toUpperCase()}</span></div>
+            <div><div class="stat-label">Extracted</div>
+                <span style="font-family:var(--mono);font-size:14px;font-weight:700;color:var(--accent)">${fmt(job.extracted||0)}</span></div>
+            <div><div class="stat-label">Skipped</div>
+                <span style="font-family:var(--mono);font-size:14px;font-weight:700;color:var(--text-dim)">${fmt(job.skipped||0)}</span></div>
+            <div><div class="stat-label">Errors</div>
+                <span style="font-family:var(--mono);font-size:14px;font-weight:700;color:${(job.errors||[]).length>0?'var(--danger)':'var(--text-dim)'}">
+                    ${(job.errors||[]).length}</span></div>
+        </div>
+        ${(job.errors||[]).length>0?`
+        <div style="font-family:var(--mono);font-size:11px;color:var(--danger)">
+            <div style="font-weight:700;margin-bottom:6px">Errors (first 20):</div>
+            ${job.errors.map(e=>`<div style="margin-bottom:2px">• ${e}</div>`).join('')}
+        </div>`:''}
+    `
+}
+
+// ============================================================
+// Modder page
+// ============================================================
+let allSessions=[];
+let blueprints=[];
+
+async function loadBlueprints(){
+    try{
+        blueprints=await api('GET','/blueprints');
+        const sel=document.getElementById('blueprint-select');
+        if(blueprints.length===0){
+            sel.innerHTML='<option value="">No blueprints found — run Archiver first</option>';
+        }else{
+            sel.innerHTML=blueprints.map(b=>
+                `<option value="${b.indexFingerprint}">${b.indexFingerprint.slice(0,16)}...  (${new Date(b.savedAt).toLocaleDateString()})</option>`
+            ).join('')
+        }
+    }catch(e){console.warn('Could not load blueprints:',e.message)}
+}
+
+async function loadModderSessions(){
+    const list=document.getElementById('modder-sessions-list');
+    list.innerHTML='<div class="loading-shimmer" style="height:60px;margin-bottom:10px"></div>'.repeat(2);
+    try{
+        allSessions=await api('GET','/sessions');
+        if(allSessions.length===0){
+            list.innerHTML='<div class="empty-state"><i class="bi bi-layers"></i><p>No sessions yet. Create one above.</p></div>';
+            return
+        }
+        list.innerHTML=allSessions.map(s=>`
+        <div class="session-card">
+            <div style="flex:1;min-width:0">
+                <div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${s.label||'Unnamed'}</div>
+                <div style="font-family:var(--mono);font-size:10px;color:var(--text-muted)">
+                    ${s.sessionId.slice(0,8)}...&nbsp;·&nbsp;${s.fileCount||0} files&nbsp;·&nbsp;${s.updatedAt?new Date(s.updatedAt).toLocaleDateString():'—'}
+                </div>
+            </div>
+            <span class="session-status-badge status-${s.status}">${s.status}</span>
+            <div style="display:flex;gap:6px">
+                <button class="btn-ghost" onclick="loadSessionDetail('${s.sessionId}')" title="Open">
+                    <i class="bi bi-folder2-open"></i>
+                </button>
+                <button class="btn-danger" onclick="discardSessionById('${s.sessionId}')" title="Discard">
+                    <i class="bi bi-trash"></i>
+                </button>
+            </div>
+        </div>`).join('')
+    }catch(err){
+        list.innerHTML='<div class="empty-state"><i class="bi bi-exclamation-circle"></i><p>'+err.message+'</p></div>'
+    }
+}
+
+function showModderCreate(){
+    document.getElementById('modder-blueprint-form').style.display='none';
+    const f=document.getElementById('modder-create-form');
+    f.style.display=f.style.display==='none'?'':'none'
+}
+
+function showModderBlueprint(){
+    document.getElementById('modder-create-form').style.display='none';
+    const f=document.getElementById('modder-blueprint-form');
+    f.style.display=f.style.display==='none'?'':'none'
+}
+
+async function createModderSession(){
+    const label=document.getElementById('new-session-label').value.trim();
+    try{
+        await api('POST','/sessions',{label:label||'New Session'});
+        document.getElementById('modder-create-form').style.display='none';
+        document.getElementById('new-session-label').value='';
+        toast('Session created');loadModderSessions()
+    }catch(err){toast(err.message,'error')}
+}
+
+async function createBlueprintSession(){
+    const fp=document.getElementById('blueprint-select').value;
+    const label=document.getElementById('bp-session-label').value.trim();
+    if(!fp){toast('Select a blueprint','warn');return}
+    try{
+        toast('Loading blueprint — this may take a moment for large packs...');
+        await api('POST','/sessions/from-blueprint',{indexFingerprint:fp,label});
+        document.getElementById('modder-blueprint-form').style.display='none';
+        document.getElementById('bp-session-label').value='';
+        toast('Session opened from blueprint');loadModderSessions()
+    }catch(err){toast(err.message,'error')}
+}
+
+async function loadSessionDetail(id){
+    activeSessionId=id;
+    document.getElementById('modder-step-choose').style.display='none';
+    document.getElementById('modder-step-detail').style.display='';
+    try{
+        const session=await api('GET','/sessions/'+id);
+        document.getElementById('detail-session-label').textContent=session.label||'Session';
+        document.getElementById('detail-session-meta').textContent=
+            id.slice(0,8)+'...  ·  '+new Date(session.updatedAt||'').toLocaleString();
+        const badge=document.getElementById('detail-status-badge');
+        badge.className='session-status-badge status-'+session.status;
+        badge.textContent=session.status;
+        // Show/hide action buttons based on status
+        document.getElementById('btn-prepare').style.display=
+            ['active','interrupted'].includes(session.status)?'':'none';
+        document.getElementById('btn-commit').style.display=
+            session.status==='ready'?'':'none';
+        // Load files
+        activeSessionFiles=session.stagedFiles||[];
+        renderStagedFiles()
+    }catch(err){toast(err.message,'error')}
+}
+
+function closeSessionDetail(){
+    activeSessionId=null;activeSessionFiles=[];
+    document.getElementById('modder-step-detail').style.display='none';
+    document.getElementById('modder-step-choose').style.display='';
+    loadModderSessions()
+}
+
+function renderStagedFiles(){
+    const cat=document.getElementById('staged-cat-filter').value;
+    const search=document.getElementById('staged-search').value.toLowerCase();
+    let files=activeSessionFiles;
+    if(cat)files=files.filter(f=>f.category===cat);
+    if(search)files=files.filter(f=>f.targetName.toLowerCase().includes(search));
+    document.getElementById('detail-file-count').textContent=fmt(activeSessionFiles.length);
+    const list=document.getElementById('staged-files-list');
+    if(files.length===0){
+        list.innerHTML='<div class="empty-state" style="padding:24px"><i class="bi bi-inbox"></i><p>No files</p></div>';
+        return
+    }
+    list.innerHTML=files.map(f=>`
+    <div class="staged-file-row">
+        <span class="staged-cat cat-${f.category}">${f.category}</span>
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)"
+            class="${f.category==='deleted'?'cat-deleted':''}">${f.targetName}</span>
+        <span style="color:var(--text-muted)">${f.sizeBytes?fmtBytes(f.sizeBytes):''}</span>
+        ${f.category!=='deleted'?`
+        <button class="btn-danger" style="padding:2px 8px;font-size:11px" onclick="removeFileFromSession('${f.targetName.replace(/'/g,"\\'")}')">
+            <i class="bi bi-x"></i>
+        </button>`:'<span style="color:var(--text-muted);font-size:11px;padding:0 8px">deleted</span>'}
+    </div>`).join('')
+}
+
+async function addFileToSession(){
+    const sourcePath=document.getElementById('add-source-path').value.trim();
+    const targetName=document.getElementById('add-target-name').value.trim();
+    if(!sourcePath||!targetName){toast('Both paths are required','warn');return}
+    try{
+        const staged=await api('POST','/sessions/'+activeSessionId+'/files',{sourcePath,targetName});
+        toast('File added: '+targetName);
+        document.getElementById('add-source-path').value='';
+        document.getElementById('add-target-name').value='';
+        document.getElementById('detail-add-form').style.display='none';
+        // Refresh session
+        await loadSessionDetail(activeSessionId)
+    }catch(err){toast(err.message,'error')}
+}
+
+async function removeFileFromSession(name){
+    try{
+        await api('DELETE','/sessions/'+activeSessionId+'/files/'+encodeURIComponent(name));
+        toast(name+' marked as deleted');
+        await loadSessionDetail(activeSessionId)
+    }catch(err){toast(err.message,'error')}
+}
+
+async function prepareActiveSession(){
+    try{
+        await api('POST','/sessions/'+activeSessionId+'/prepare');
+        toast('Session prepared — ready to commit');
+        await loadSessionDetail(activeSessionId)
+    }catch(err){toast(err.message,'error')}
+}
+
+async function commitActiveSession(){
+    if(!confirm('Commit this session? This will write new pack files to the configured data directory.'))return;
+    try{
+        toast('Committing...');
+        const result=await api('POST','/sessions/'+activeSessionId+'/commit');
+        toast('Committed — '+fmt(result.complete)+' assets written');
+        await loadSessionDetail(activeSessionId)
+    }catch(err){toast(err.message,'error')}
+}
+
+async function discardActiveSession(){
+    if(!confirm('Discard this session and delete its working directory?'))return;
+    await discardSessionById(activeSessionId);
+    closeSessionDetail()
+}
+
+async function discardSessionById(id){
+    try{
+        await api('POST','/sessions/'+id+'/discard');
+        toast('Session discarded');loadModderSessions()
+    }catch(err){toast(err.message,'error')}
+}
+
+// ============================================================
+// Config page
+// ============================================================
+async function loadConfig(){
+    try{
+        const config=await api('GET','/config');
+        document.getElementById('cfg-index').value=config.indexPath||'';
+        document.getElementById('cfg-label').value=config.label||'';
+        document.getElementById('cfg-store').value=config.assetStoreDir||'';
+        document.getElementById('cfg-sessions').value=config.sessionsDir||'';
+        renderPackPathInputs(config.packPaths||[]);
+        document.getElementById('config-status-card').style.display='';
+        document.getElementById('config-display').textContent=JSON.stringify(config,null,2)
+    }catch{renderPackPathInputs([])}
+}
+
+function renderPackPathInputs(packPaths){
+    const paths=Array.isArray(packPaths)?Object.fromEntries(packPaths):{};
+    document.getElementById('pack-paths-grid').innerHTML=
+        Array.from({length:8},(_,i)=>i+1).map(slot=>`
+        <div class="form-field">
+            <label class="form-label">data.00${slot}</label>
+            <input type="text" class="form-control-dark" id="cfg-pack-${slot}"
+                placeholder="/path/to/data.00${slot}" value="${paths[slot]||''}">
+        </div>`).join('')
+}
+
+async function saveConfig(){
+    const indexPath=document.getElementById('cfg-index').value.trim();
+    if(!indexPath){toast('Index path is required','warn');return}
+    const packPaths={};
+    for(let i=1;i<=8;i++){
+        const v=document.getElementById('cfg-pack-'+i).value.trim();
+        if(v)packPaths[i]=v
+    }
+    try{
+        const config=await api('POST','/config',{
+            indexPath,packPaths,
+            assetStoreDir:document.getElementById('cfg-store').value.trim()||undefined,
+            sessionsDir:document.getElementById('cfg-sessions').value.trim()||undefined,
+            label:document.getElementById('cfg-label').value.trim()||undefined
+        });
+        toast('Configuration saved');
+        setStatus('ok',config.label||'Configured');
+        document.getElementById('config-status-card').style.display='';
+        document.getElementById('config-display').textContent=JSON.stringify(config,null,2)
+    }catch(err){toast(err.message,'error')}
+}
+
+// ============================================================
+// Init
+// ============================================================
+(async()=>{
+    renderPackPathInputs([]);
+    try{
+        await api('GET','/config');
+        setStatus('ok','Ready');
+        loadEntries(1)
+    }catch{
+        setStatus('idle','Not configured');
+        showPage('config')
+    }
+})()
+</script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
