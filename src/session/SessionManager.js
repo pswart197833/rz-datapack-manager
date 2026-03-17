@@ -1,40 +1,41 @@
 'use strict';
 
-const fs                = require('fs');
-const path              = require('path');
+const fs               = require('fs');
+const path             = require('path');
 const { v4: uuidv4 }   = require('uuid');
-const Session           = require('./Session');
-const StagedFile        = require('./StagedFile');
+const Session          = require('./Session');
+const StagedFile       = require('./StagedFile');
 const PackConfiguration = require('../config/PackConfiguration');
-const Blueprint         = require('../fingerprint/Blueprint');
+const Blueprint        = require('../fingerprint/Blueprint');
+const AssetStore       = require('../core/AssetStore');
 
 /**
  * SessionManager
  * src/session/SessionManager.js
  *
- * Gatekeeper between in-progress work and permanent libraries.
- * Nothing enters FingerprintStore, AssetStore, or Blueprint without
- * going through a successful commit.
+ * Creates, tracks, persists, and resumes Session objects.
+ * Owns Phase 1 (prepare) — composing the final ordered asset lists.
+ * Delegates Phase 2+3 to CommitPipeline.
  *
- * Owns the full session lifecycle and Phase 1 preparation.
- * Delegates Phase 2 and 3 to CommitPipeline.
+ * prepare() writes two files to the session working directory:
  *
- * Session persistence:
- *   Each session lives in {sessionsDir}/{sessionId}/
- *   Session state is written to {sessionId}/session.json
- *   Phase 1 outputs: {sessionId}/pack-list.json + {sessionId}/index-list.json
+ *   pack-list.json   — StagedFile records for assets that have real bytes to write.
+ *                      Zero-size sentinel-backed entries are EXCLUDED — DataPackWriter
+ *                      has nothing to write for them.
  *
- * Two entry points:
- *   create()            — fresh build, empty session
- *   openFromBlueprint() — modify existing pack, pre-populated from blueprint
+ *   index-list.json  — All entries in original indexOffset order, including zero-size
+ *                      placeholders. Each entry: { name, packId, offset, size }.
+ *                      size === 0 means no bytes were written; original packId/offset
+ *                      are preserved so DataPackIndex.serialize() reconstructs the
+ *                      byte-identical entry.
  */
 
 class SessionManager {
 
     /**
-     * @param {string}           sessionsDir      - Root directory for all session folders
-     * @param {FingerprintStore} fingerprintStore  - For openFromBlueprint() lookups
-     * @param {AssetStore}       assetStore        - For openFromBlueprint() path resolution
+     * @param {string}           sessionsDir
+     * @param {FingerprintStore} fingerprintStore
+     * @param {AssetStore}       assetStore
      */
     constructor(sessionsDir, fingerprintStore, assetStore) {
         this.sessionsDir      = sessionsDir;
@@ -50,40 +51,45 @@ class SessionManager {
     // ---------------------------------------------------------------------------
 
     /**
-     * Start a new empty session with a working directory.
+     * Create a new empty session.
      *
-     * @param {string}            label  - User-friendly name
-     * @param {PackConfiguration} config - Target pack configuration
+     * @param {PackConfiguration} config
+     * @param {string}            [label]
      * @returns {Promise<Session>}
      */
-    async create(label, config) {
+    async create(config, label = '') {
         const sessionId  = uuidv4();
         const workingDir = path.join(this.sessionsDir, sessionId);
-
         fs.mkdirSync(workingDir, { recursive: true });
 
         const session = new Session({
             sessionId,
-            label,
+            label: label || `Session ${new Date().toISOString().slice(0, 10)}`,
             workingDir,
-            status:         'active',
-            config,
-            blueprintRef:   null,
-            blueprintLoaded: false
+            status: 'active',
+            config
         });
 
         this.#activeSessions.set(sessionId, session);
         await this.checkpoint(sessionId);
-
         return session;
     }
 
+    // ---------------------------------------------------------------------------
+    // Open from blueprint
+    // ---------------------------------------------------------------------------
+
     /**
-     * Start a session pre-populated from an existing blueprint.
+     * Open a session pre-populated from a blueprint.
      * Creates lazy 'in-store' StagedFile entries for every asset in the blueprint
      * without resolving actual file paths — keeps session load fast.
      *
      * This is Use Case 1 — modifying an existing pack.
+     *
+     * Zero-size entries in the blueprint are staged as in-store entries pointing
+     * to the null-asset sentinel. They are tracked in the session for index
+     * reconstruction but excluded from pack-list.json at prepare() time so
+     * DataPackWriter never tries to write empty bytes.
      *
      * @param {string}            indexFingerprint - SHA-256 of data.000 to open from
      * @param {string}            storeDir         - Root store directory for blueprint lookup
@@ -103,13 +109,13 @@ class SessionManager {
 
         const session = new Session({
             sessionId,
-            label:           label || `From blueprint ${indexFingerprint.slice(0, 8)}`,
+            label:             label || `From blueprint ${indexFingerprint.slice(0, 8)}`,
             workingDir,
-            status:          'active',
+            status:            'active',
             config,
-            blueprintRef:    indexFingerprint,
-            blueprintStoreDir: storeDir,   // where blueprint files actually live
-            blueprintLoaded: false
+            blueprintRef:      indexFingerprint,
+            blueprintStoreDir: storeDir,
+            blueprintLoaded:   false
         });
 
         // Pre-populate staged files from blueprint — lazily, no file I/O yet.
@@ -121,7 +127,12 @@ class SessionManager {
             if (!fileRecord) continue;
 
             const staged = session.addFromStore(fileRecord.hash, fileRecord.decodedName);
-            if (staged) staged.packId = record.packId;
+            if (staged) {
+                staged.packId = record.packId;
+                // Preserve original pack offset so zero-size entries can be
+                // written to index-list.json with their exact original offset.
+                staged.packOffset = record.packOffset;
+            }
         }
 
         session.blueprintLoaded = true;
@@ -161,16 +172,10 @@ class SessionManager {
     // List
     // ---------------------------------------------------------------------------
 
-    /**
-     * List all sessions and their statuses.
-     * Reads session.json from each subdirectory in sessionsDir.
-     *
-     * @returns {Promise<Array<{ sessionId, label, status, createdAt, updatedAt }>>}
-     */
     async list() {
         if (!fs.existsSync(this.sessionsDir)) return [];
 
-        const entries = fs.readdirSync(this.sessionsDir);
+        const entries   = fs.readdirSync(this.sessionsDir);
         const summaries = [];
 
         for (const entry of entries) {
@@ -187,9 +192,7 @@ class SessionManager {
                     updatedAt: obj.updatedAt || null,
                     fileCount: (obj.stagedFiles || []).length
                 });
-            } catch {
-                // Skip malformed session files
-            }
+            } catch { /* skip malformed session files */ }
         }
 
         return summaries.sort((a, b) => {
@@ -207,12 +210,14 @@ class SessionManager {
      * Phase 1 — compose and write the final ordered asset lists to disk.
      * Transitions session status to 'ready'.
      *
-     * Writes two files to the session working directory:
-     *   pack-list.json  — ordered array of StagedFile records for pack building
-     *   index-list.json — ordered array of targetNames for index serialization
+     * Writes two files:
      *
-     * These lists are what CommitPipeline Phase 2 reads to drive the build.
-     * Once written, the session is stable — the user's staged state is locked in.
+     *   pack-list.json  — StagedFile records for real (non-zero-size) assets only,
+     *                     sorted by packId then packOffset for byte-identical reconstruction.
+     *
+     *   index-list.json — ALL entries in original indexOffset order including zero-size
+     *                     placeholders. Format: { name, packId, offset, size }
+     *                     where size === 0 means placeholder (no pack bytes written).
      *
      * @param {string} sessionId
      * @returns {Promise<void>}
@@ -226,33 +231,17 @@ class SessionManager {
             );
         }
 
-        // Compose the build list — all non-deleted staged files.
-        // Two orderings are needed:
-        //
-        // pack-list.json  — sorted by packId then packOffset so DataPackWriter
-        //                   writes assets into each pack file in the original
-        //                   offset sequence. Without this, offsets diverge from
-        //                   the original and byte-identical reconstruction fails.
-        //
-        // index-list.json — sorted by indexOffset so DataPackIndex.serialize()
-        //                   produces a data.000 with entries in the original order.
-        //
-        // Both orderings come from the BlueprintRecord positional data.
-        // For sessions opened from a blueprint the staged files carry this via
-        // the session's blueprint reference. For fresh builds order doesn't matter
-        // since there is no "original" to match.
-
         const allFiles = session.stagedFiles.filter(f => !f.isDeleted());
 
         // Load blueprint positional data if available
         let packOrderMap  = null; // targetName → { packId, packOffset }
         let indexOrderMap = null; // targetName → indexOffset
-        let blueprint     = null; // kept in outer scope for index-list construction
+        let blueprint     = null;
 
         if (session.blueprintRef) {
             const bpStoreDir = session.blueprintStoreDir
                             || (this.fingerprintStore.dbPath
-                                ? require('path').dirname(this.fingerprintStore.dbPath)
+                                ? path.dirname(this.fingerprintStore.dbPath)
                                 : null);
             blueprint = bpStoreDir
                 ? await Blueprint.loadFromDisk(bpStoreDir, session.blueprintRef)
@@ -267,58 +256,79 @@ class SessionManager {
                     packOrderMap.set(fr.decodedName,  { packId: record.packId, packOffset: record.packOffset });
                     indexOrderMap.set(fr.decodedName, record.indexOffset);
                 }
+            } else if (session.blueprintRef) {
+                console.warn('  prepare: blueprint not found — falling back to insertion order');
             }
         }
 
-        // Sort pack list: by packId asc, then packOffset asc within each pack
-        if (packOrderMap) {
-            console.log(`  prepare: sorting ${allFiles.length.toLocaleString()} files by packId+packOffset`);
-        } else if (session.blueprintRef) {
-            console.warn('  prepare: blueprint not found — falling back to insertion order');
-        }
-        const buildList = [...allFiles].sort((a, b) => {
-            if (!packOrderMap) return 0; // fresh build — preserve insertion order
-            const pa = packOrderMap.get(a.targetName);
-            const pb = packOrderMap.get(b.targetName);
-            if (!pa || !pb) return 0;
-            if (pa.packId !== pb.packId) return pa.packId - pb.packId;
-            return pa.packOffset - pb.packOffset;
-        });
+        // -----------------------------------------------------------------
+        // pack-list.json
+        // Excludes zero-size sentinel entries — DataPackWriter has no bytes
+        // to write for them. Identified by sourceFingerprint === NULL_ASSET_HASH.
+        // -----------------------------------------------------------------
+        const nullHash = AssetStore.NULL_ASSET_HASH;
 
-        // Sort index list: by indexOffset asc.
-        // Must include ALL entries from the original index — including zero-size
-        // placeholder entries that were never staged. These appear in data.000
-        // but have no content in the pack files.
+        const buildList = allFiles
+            .filter(f => f.sourceFingerprint !== nullHash)
+            .sort((a, b) => {
+                if (!packOrderMap) return 0;
+                const pa = packOrderMap.get(a.targetName);
+                const pb = packOrderMap.get(b.targetName);
+                if (!pa || !pb) return 0;
+                if (pa.packId !== pb.packId) return pa.packId - pb.packId;
+                return pa.packOffset - pb.packOffset;
+            });
+
+        if (packOrderMap) {
+            console.log(`  prepare: ${buildList.length.toLocaleString()} pack entries (${allFiles.length - buildList.length} zero-size excluded)`);
+        }
+
+        // -----------------------------------------------------------------
+        // index-list.json
+        // ALL entries in original indexOffset order, zero-size included.
+        // Each entry: { name, packId, offset, size }
+        //   size === null  → real asset, offset assigned by DataPackWriter
+        //   size === 0     → zero-size placeholder, original offset preserved
+        // -----------------------------------------------------------------
         let indexNames;
+
         if (indexOrderMap && blueprint) {
-            // Build complete ordered list from blueprint — every entry, zero-size included.
-            // Store full positional data so CommitPipeline can reconstruct zero-size stubs
-            // with correct packId and offset values.
             const allBpRecords = blueprint.getRecords()
                 .slice()
                 .sort((a, b) => a.indexOffset - b.indexOffset);
-            indexNames = allBpRecords.map(r => ({
-                name:    r.decodedName,
-                packId:  r.packId,
-                offset:  r.packOffset,
-                size:    null   // null = written by DataPackWriter; 0 = zero-size placeholder
-            }));
-            // Mark zero-size entries (not in allFiles) with size=0
-            const stagedNames = new Set(allFiles.map(f => f.targetName));
-            for (const entry of indexNames) {
-                if (!stagedNames.has(entry.name)) entry.size = 0;
-            }
+
+            const buildSet = new Set(buildList.map(f => f.targetName));
+
+            indexNames = allBpRecords.map(r => {
+                const isZero = !buildSet.has(r.decodedName);
+                return {
+                    name:   r.decodedName,
+                    packId: r.packId,
+                    offset: r.packOffset,
+                    // null = real asset (offset comes from DataPackWriter)
+                    // 0    = zero-size placeholder (original offset preserved)
+                    size:   isZero ? 0 : null
+                };
+            });
         } else {
+            // Fresh build — no blueprint, no originals to match
             const indexSorted = [...allFiles].sort((a, b) => {
                 if (!indexOrderMap) return 0;
                 const ia = indexOrderMap.get(a.targetName) ?? 0;
                 const ib = indexOrderMap.get(b.targetName) ?? 0;
                 return ia - ib;
             });
-            indexNames = indexSorted.map(f => ({ name: f.targetName, packId: null, offset: null, size: null }));
+            indexNames = indexSorted.map(f => ({
+                name:   f.targetName,
+                packId: f.packId || null,
+                offset: null,
+                size:   null
+            }));
         }
 
-        // Write pack-list.json — full StagedFile records for CommitPipeline
+        // -----------------------------------------------------------------
+        // Write both lists
+        // -----------------------------------------------------------------
         const packListPath  = path.join(session.workingDir, 'pack-list.json');
         const indexListPath = path.join(session.workingDir, 'index-list.json');
 
@@ -343,16 +353,6 @@ class SessionManager {
     // Commit
     // ---------------------------------------------------------------------------
 
-    /**
-     * Verify session is ready then delegate to CommitPipeline.
-     * CommitPipeline is instantiated here and injected with all dependencies.
-     *
-     * NOTE: CommitPipeline is required lazily to avoid circular dependency
-     * (CommitPipeline depends on SessionManager indirectly via Session).
-     *
-     * @param {string} sessionId
-     * @returns {Promise<CommitResult>}
-     */
     async commit(sessionId) {
         const session = await this.#requireSession(sessionId);
 
@@ -363,7 +363,6 @@ class SessionManager {
             );
         }
 
-        // Lazy require to avoid circular dependency at module load time
         const CommitPipeline = require('./CommitPipeline');
         const pipeline = new CommitPipeline(
             session,
@@ -379,16 +378,12 @@ class SessionManager {
     // Discard
     // ---------------------------------------------------------------------------
 
-    /**
-     * Delete the session's working directory and remove its record.
-     * @param {string} sessionId
-     * @returns {Promise<void>}
-     */
     async discard(sessionId) {
-        const sessionDir = path.join(this.sessionsDir, sessionId);
+        const session = this.#activeSessions.get(sessionId)
+                     || await this.resume(sessionId).catch(() => null);
 
-        if (fs.existsSync(sessionDir)) {
-            fs.rmSync(sessionDir, { recursive: true, force: true });
+        if (session && fs.existsSync(session.workingDir)) {
+            fs.rmSync(session.workingDir, { recursive: true });
         }
 
         this.#activeSessions.delete(sessionId);
@@ -398,64 +393,44 @@ class SessionManager {
     // Checkpoint
     // ---------------------------------------------------------------------------
 
-    /**
-     * Persist current session state to disk mid-session.
-     * Called automatically after significant state changes.
-     *
-     * @param {string} sessionId
-     * @returns {Promise<void>}
-     */
     async checkpoint(sessionId) {
-        const session = await this.#requireSession(sessionId);
-        const jsonPath = this.#sessionJsonPath(sessionId);
+        const session = this.#activeSessions.get(sessionId);
+        if (!session) return;
 
-        const dir = path.dirname(jsonPath);
+        const sessionPath = this.#sessionJsonPath(sessionId);
+        const dir         = path.dirname(sessionPath);
         if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
         await fs.promises.writeFile(
-            jsonPath,
+            sessionPath,
             JSON.stringify(session.toJSON(), null, 2),
             'utf8'
         );
     }
 
     // ---------------------------------------------------------------------------
-    // Get
+    // Query
     // ---------------------------------------------------------------------------
 
-    /**
-     * Retrieve a loaded session by ID.
-     * @param {string} sessionId
-     * @returns {Session|null}
-     */
     getSession(sessionId) {
         return this.#activeSessions.get(sessionId) || null;
     }
 
     // ---------------------------------------------------------------------------
-    // Private helpers
+    // Private
     // ---------------------------------------------------------------------------
 
-    /**
-     * Get session from cache, loading from disk if needed.
-     * @param {string} sessionId
-     * @returns {Promise<Session>}
-     */
-    async #requireSession(sessionId) {
-        if (this.#activeSessions.has(sessionId)) {
-            return this.#activeSessions.get(sessionId);
-        }
-        // Try loading from disk
-        return this.resume(sessionId);
-    }
-
-    /**
-     * Resolve the session.json path for a given session ID.
-     * @param {string} sessionId
-     * @returns {string}
-     */
     #sessionJsonPath(sessionId) {
         return path.join(this.sessionsDir, sessionId, 'session.json');
+    }
+
+    async #requireSession(sessionId) {
+        let session = this.#activeSessions.get(sessionId);
+        if (!session) {
+            session = await this.resume(sessionId).catch(() => null);
+        }
+        if (!session) throw new Error(`Session not found: ${sessionId}`);
+        return session;
     }
 
 }

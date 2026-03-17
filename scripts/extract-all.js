@@ -61,117 +61,65 @@ Options:
   --data     <path>   Directory containing data.000 – data.008 (required)
   --store    <path>   Asset store root directory (required)
   --sessions <path>   Sessions directory (default: ./sessions)
-  --types    <list>   Comma-separated types to extract e.g. dds,tga,bmp
-  --limit    <n>      Stop after N extractions (useful for testing)
-  --dry-run           Print what would be extracted without writing files
-  --help              Show this help
-
-Examples:
-  # Extract everything from a game install
-  node scripts/extract-all.js --data /game/data --store ./store
-
-  # Extract only textures and models from a specific version
-  node scripts/extract-all.js --data ./v8.1/data --store ./store --types dds,tga,cob,nx3
-
-  # Test run — first 100 entries only
-  node scripts/extract-all.js --data ./data --store ./store --limit 100 --dry-run
+  --types    <list>   Comma-separated types to extract e.g. dds,tga,bmp (default: all)
+  --limit    <n>      Stop after extracting N assets (for testing)
+  --dry-run           Print what would be extracted, without writing files
+  --help              Show this message
 `);
     process.exit(0);
-}
-
-if (!args.data || !args.store) {
-    console.error('Error: --data and --store are required. Run with --help for usage.');
-    process.exit(1);
-}
-
-// ---------------------------------------------------------------------------
-// Progress display
-// ---------------------------------------------------------------------------
-
-const startTime = Date.now();
-
-function formatBytes(bytes) {
-    if (bytes < 1024)       return `${bytes} B`;
-    if (bytes < 1024*1024)  return `${(bytes/1024).toFixed(1)} KB`;
-    return `${(bytes/1024/1024).toFixed(1)} MB`;
-}
-
-function formatTime(ms) {
-    if (ms < 1000)  return `${ms}ms`;
-    if (ms < 60000) return `${(ms/1000).toFixed(1)}s`;
-    return `${Math.floor(ms/60000)}m ${Math.floor((ms%60000)/1000)}s`;
-}
-
-// Terminal column width — keep line within this to prevent wrapping
-const TERM_WIDTH = process.stdout.columns || 120;
-
-function renderProgress(done, total, currentFile, extracted, skipped) {
-    const pct     = total > 0 ? Math.floor((done / total) * 100) : 0;
-    const barLen  = 28;
-    const filled  = Math.floor(barLen * pct / 100);
-    const bar     = '█'.repeat(filled) + '░'.repeat(barLen - filled);
-    const elapsed = formatTime(Date.now() - startTime);
-
-    // Sanitise filename — strip any control characters (\r \n etc.) that would
-    // break the carriage-return overwrite and cause new lines to appear mid-run
-    const safeName = currentFile.replace(/[\r\n\t\x00-\x1f]/g, '');
-
-    // Build the fixed portion of the line (everything except the filename)
-    const fixed = `\r  [${bar}] ${String(pct).padStart(3)}%  ` +
-                  `${done.toLocaleString()}/${total.toLocaleString()}  ` +
-                  `+${extracted} ~${skipped}  ${elapsed}  `;
-
-    // Calculate remaining space for filename without exceeding terminal width
-    // Subtract 3 for trailing spaces and the carriage return byte
-    const nameSpace = Math.max(10, TERM_WIDTH - fixed.length - 3);
-    const name = safeName.length > nameSpace
-        ? '...' + safeName.slice(-(nameSpace - 3))
-        : safeName.padEnd(nameSpace);
-
-    process.stdout.write(fixed + name + '   ');
 }
 
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
-async function main() {
-    const dataDir    = path.resolve(args.data);
-    const storeDir   = path.resolve(args.store);
-    const sessionsDir = path.resolve(args.sessions || './sessions');
-    const types      = args.types ? args.types.split(',').map(t => t.trim().toLowerCase()) : null;
-    const limit      = args.limit ? parseInt(args.limit) : null;
-    const dryRun     = args['dry-run'] === true;
+const dataDir    = path.resolve(args.data    || './data');
+const storeDir   = path.resolve(args.store   || './store');
+const sessionsDir = path.resolve(args.sessions || './sessions');
+const types      = args.types
+    ? args.types.split(',').map(t => t.trim().toLowerCase()) : null;
+const limit      = args.limit ? parseInt(args.limit) : null;
+const dryRun     = args['dry-run'] === true;
 
+const startTime = Date.now();
+
+(async () => {
     // Validate data directory
     if (!fs.existsSync(path.join(dataDir, 'data.000'))) {
         console.error(`Error: data.000 not found in ${dataDir}`);
         process.exit(1);
     }
 
-    // Ensure store directory exists
-    if (!fs.existsSync(storeDir)) fs.mkdirSync(storeDir, { recursive: true });
+    // Ensure directories exist
+    if (!fs.existsSync(storeDir))    fs.mkdirSync(storeDir,    { recursive: true });
     if (!fs.existsSync(sessionsDir)) fs.mkdirSync(sessionsDir, { recursive: true });
 
     console.log('\n  DataPack Manager — Extract All');
     console.log('  ' + '─'.repeat(48));
     console.log(`  Data dir:   ${dataDir}`);
     console.log(`  Store dir:  ${storeDir}`);
-    if (types)   console.log(`  Types:      ${types.join(', ')}`);
-    if (limit)   console.log(`  Limit:      ${limit}`);
-    if (dryRun)  console.log(`  Mode:       DRY RUN — no files will be written`);
+    if (types)  console.log(`  Types:      ${types.join(', ')}`);
+    if (limit)  console.log(`  Limit:      ${limit}`);
+    if (dryRun) console.log(`  Mode:       DRY RUN — no files will be written`);
     console.log('');
 
-    // Build configuration
     const config = PackConfiguration.fromDirectory(dataDir, storeDir, sessionsDir);
 
     // Initialise stores
     const assetStore = new AssetStore(storeDir);
     await assetStore.rebuild();
 
+    // Ensure null-asset sentinel exists before any blueprint or session work.
+    // Zero-size index entries are registered against this sentinel so they
+    // flow through the pipeline uniformly without special-case branching.
+    assetStore.ensureNullAsset();
+
     const dbPath  = path.join(storeDir, 'fingerprints.jsonl');
     const fpStore = new FingerprintStore(dbPath, assetStore);
     await fpStore.load();
+
+    // Ensure null-asset FingerprintRecord is registered
+    await fpStore.ensureNullAsset();
 
     const existingCount = fpStore.list('asset').length;
     if (existingCount > 0) {
@@ -185,7 +133,6 @@ async function main() {
     console.log('');
 
     if (dryRun) {
-        // In dry-run mode, just list what would be extracted
         const { entries, total } = manager.getEntries({
             type:     types ? types[0] : undefined,
             pageSize: 999999
@@ -218,52 +165,68 @@ async function main() {
     extractedCount = result.extracted;
     skippedCount   = result.skipped;
 
-    // Final progress line
-    renderProgress(result.extracted + result.skipped, result.extracted + result.skipped,
-        'done', result.extracted, result.skipped);
+    renderProgress(
+        result.extracted + result.skipped,
+        result.extracted + result.skipped,
+        'done', result.extracted, result.skipped
+    );
     process.stdout.write('\n\n');
 
     // Summary
     const elapsed = formatTime(Date.now() - startTime);
 
-    // Reload FingerprintStore from disk — the in-memory instance was loaded before
-    // extraction ran so it doesn't reflect alias registrations written during extractAll().
-    await fpStore.load();
-    const allRecords = fpStore.list('asset');
+    const fpStore2 = new FingerprintStore(dbPath, assetStore);
+    await fpStore2.load();
+    const totalAssets = fpStore2.list('asset').filter(r => !r.isAlias).length;
+    const aliases     = fpStore2.list('asset').filter(r => r.isAlias).length;
 
-    // Count categories using FingerprintRecord.isAlias flag
-    const uniqueFiles = allRecords.filter(r => !r.isAlias && r.extractedPath !== null).length;
-    const aliasCount  = allRecords.filter(r => r.isAlias).length;
-    // Zero-size entries are skipped before registration — derive count from result
-    const zeroSizeSkip = result.skipped - aliasCount;
-
+    console.log('  Extraction complete');
     console.log('  ' + '─'.repeat(48));
-    console.log(`  Completed in ${elapsed}`);
-    console.log(`  Extracted:  ${result.extracted.toLocaleString()} unique files written to store`);
-    console.log(`  Aliases:    ${aliasCount.toLocaleString()} entries share content with an existing file`);
-    if (zeroSizeSkip > 0) {
-        console.log(`  Zero-size:  ${zeroSizeSkip.toLocaleString()} entries skipped (empty files)`);
-    }
+    console.log(`  Extracted:  ${result.extracted.toLocaleString()} new assets`);
+    console.log(`  Skipped:    ${result.skipped.toLocaleString()} (already stored or zero-size)`);
     console.log(`  Errors:     ${result.errors.length}`);
+    console.log(`  Store size: ${totalAssets.toLocaleString()} unique + ${aliases.toLocaleString()} aliases`);
+    console.log(`  Time:       ${elapsed}`);
 
     if (result.errors.length > 0) {
-        console.log('\n  Errors (first 10):');
+        console.log('\n  First 10 errors:');
         result.errors.slice(0, 10).forEach(e => console.log(`    ${e}`));
     }
 
-    const total = result.extracted + result.skipped;
     console.log('');
-    console.log(`  Index entries total:    ${total.toLocaleString()}`);
-    console.log(`  Unique files on disk:   ${uniqueFiles.toLocaleString()}`);
-    console.log(`  Content aliases:        ${aliasCount.toLocaleString()} (same bytes, different name)`);
-    if (zeroSizeSkip > 0) {
-        console.log(`  Zero-size entries:      ${zeroSizeSkip.toLocaleString()} (placeholder entries in index)`);
-    }
-    console.log('');
+})();
+
+// ---------------------------------------------------------------------------
+// Progress rendering
+// ---------------------------------------------------------------------------
+
+function renderProgress(done, total, currentFile, extracted, skipped) {
+    const pct    = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+    const bar    = buildBar(pct, 30);
+    const name   = (currentFile || '').slice(-35).padEnd(35);
+    process.stdout.write(
+        `\r  [${bar}] ${String(pct).padStart(3)}%  ` +
+        `${done.toLocaleString().padStart(7)}/${total.toLocaleString()}  ` +
+        `+${extracted}  ~${skipped}  ${name}`
+    );
 }
 
-main().catch(err => {
-    console.error('\n  [ERROR]', err.message);
-    if (process.env.DEBUG) console.error(err.stack);
-    process.exit(1);
-});
+function buildBar(pct, width) {
+    const filled = Math.round((pct / 100) * width);
+    return '█'.repeat(filled) + '░'.repeat(width - filled);
+}
+
+function formatBytes(bytes) {
+    if (bytes === 0)       return '0 B';
+    if (bytes < 1024)      return `${bytes} B`;
+    if (bytes < 1048576)   return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / 1048576).toFixed(1)} MB`;
+}
+
+function formatTime(ms) {
+    if (ms < 1000)  return `${ms}ms`;
+    if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+    const m = Math.floor(ms / 60000);
+    const s = Math.round((ms % 60000) / 1000);
+    return `${m}m ${s}s`;
+}

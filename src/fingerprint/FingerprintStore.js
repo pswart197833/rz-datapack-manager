@@ -20,9 +20,14 @@ const FingerprintRecord = require('./FingerprintRecord');
  *   Diff name + diff hash  → unrelated file     → new record
  *
  * Two lookup indexes:
- *   #primaryIndex  Map<"name::hash", FingerprintRecord>  — primary key lookup
- *   #nameIndex     Map<name, FingerprintRecord>           — latest record per name (O(1) getByName)
- *   #hashIndex     Map<hash, FingerprintRecord>           — canonical record per hash (first seen)
+ *   #primary    Map<"name::hash", FingerprintRecord>  — primary key lookup
+ *   #nameIndex  Map<name, FingerprintRecord>           — latest record per name (O(1) getByName)
+ *   #hashIndex  Map<hash, FingerprintRecord>           — canonical record per hash (first seen)
+ *
+ * The null-asset sentinel (AssetStore.NULL_ASSET_HASH / '__null__') is a
+ * special FingerprintRecord registered via ensureNullAsset(). Zero-size index
+ * entries are stored as aliases of this sentinel so the pipeline is uniform —
+ * no special-case branching needed anywhere else.
  */
 
 class FingerprintStore {
@@ -59,10 +64,57 @@ class FingerprintStore {
     }
 
     // ---------------------------------------------------------------------------
+    // Null-asset sentinel
+    // ---------------------------------------------------------------------------
+
+    /**
+     * Ensure the null-asset sentinel FingerprintRecord exists in this store.
+     *
+     * The sentinel has:
+     *   hash         = SHA-256 of empty buffer (AssetStore.NULL_ASSET_HASH)
+     *   decodedName  = '__null__'
+     *   type         = 'asset'
+     *   size         = 0
+     *   extractedPath = path to the empty sentinel file in the AssetStore
+     *
+     * Must be called after assetStore.ensureNullAsset() so the file path
+     * already exists. Safe to call multiple times — idempotent.
+     *
+     * @returns {Promise<FingerprintRecord>}
+     */
+    async ensureNullAsset() {
+        const AssetStore = require('../core/AssetStore');
+        const hash       = AssetStore.NULL_ASSET_HASH;
+        const name       = AssetStore.NULL_ASSET_NAME;
+
+        // Already registered — nothing to do
+        if (this.hasExact(name, hash)) {
+            return this.get(hash);
+        }
+
+        const nullPath = this.#assetStore.ensureNullAsset();
+        const buffer   = Buffer.alloc(0);
+
+        const record = new FingerprintRecord({
+            hash,
+            type:          'asset',
+            decodedName:   name,
+            size:          0,
+            extractedPath: nullPath,
+            isAlias:       false,
+            aliasOf:       null
+        });
+
+        this.#index(record);
+        await this.#append(record);
+        return record;
+    }
+
+    // ---------------------------------------------------------------------------
     // Read
     // ---------------------------------------------------------------------------
 
-    /** Check if a name+hash combination is already registered. */
+    /** Check if a hash is registered (any name). */
     has(hash) {
         return this.#hashIndex.has(hash);
     }
@@ -140,8 +192,6 @@ class FingerprintStore {
             decodedName,
             size:          size !== null ? size : buffer.length,
             extractedPath: resolvedPath,
-            verified:      false,
-            date:          new Date(),
             isAlias,
             aliasOf
         });
@@ -152,36 +202,11 @@ class FingerprintStore {
     }
 
     // ---------------------------------------------------------------------------
-    // Verify
-    // ---------------------------------------------------------------------------
-
-    async verify(record) {
-        return this.#assetStore.verify(record);
-    }
-
-    // ---------------------------------------------------------------------------
     // Prune
     // ---------------------------------------------------------------------------
 
     /**
-     * Remove records whose extractedPath no longer exists on disk.
-     */
-    async prune() {
-        let removed = 0;
-        for (const [key, record] of this.#primary) {
-            if (record.isAsset() && record.extractedPath && !fs.existsSync(record.extractedPath)) {
-                this.#primary.delete(key);
-                this.#nameIndex.delete(record.decodedName);
-                if (this.#hashIndex.get(record.hash) === record) this.#hashIndex.delete(record.hash);
-                removed++;
-            }
-        }
-        if (removed > 0) await this.#rewrite();
-        return removed;
-    }
-
-    /**
-     * Remove stub records (null extractedPath) that have been superseded.
+     * Remove stub records that have been superseded by real extractions.
      * A stub is registered by loadIndex() before extraction. After extractAll(),
      * a real record exists with the same name + hash — the stub is redundant.
      */

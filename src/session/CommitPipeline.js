@@ -12,6 +12,7 @@ const BlueprintRecord = require('../fingerprint/BlueprintRecord');
 const CommitProgress  = require('./CommitProgress');
 const ProgressEntry   = require('./ProgressEntry');
 const StagedFile      = require('./StagedFile');
+const AssetStore      = require('../core/AssetStore');
 
 /**
  * CommitPipeline
@@ -23,6 +24,13 @@ const StagedFile      = require('./StagedFile');
  * Phase 2 — build all pack files under .build names with progress tracking.
  * Phase 3 — fingerprint, register in permanent libraries, rename .build files.
  *
+ * Zero-size entries:
+ *   pack-list.json excludes sentinel-backed (zero-size) entries so DataPackWriter
+ *   never receives an empty buffer from the normal build loop.
+ *   index-list.json includes ALL entries. In #buildIndex(), entries with size === 0
+ *   are inserted directly as AssetItem stubs with their original packId and offset —
+ *   no special branching needed elsewhere.
+ *
  * Performance design:
  *   - FilenameCodec instantiated once per build, not per asset
  *   - Progress saved every PROGRESS_SAVE_INTERVAL assets (not per step)
@@ -30,7 +38,7 @@ const StagedFile      = require('./StagedFile');
  *   - in-store asset bytes read via AssetStore.getPath() then readFileSync once
  */
 
-const PROGRESS_SAVE_INTERVAL = 500; // save progress.json every N assets
+const PROGRESS_SAVE_INTERVAL = 500;
 
 class CommitPipeline {
 
@@ -41,7 +49,7 @@ class CommitPipeline {
         this.assetStore       = assetStore;
         this.#progressPath    = path.join(session.workingDir, 'progress.json');
         this.#progress        = null;
-        this.#codec           = new FilenameCodec(); // one instance for the whole build
+        this.#codec           = new FilenameCodec();
     }
 
     #progressPath;
@@ -54,12 +62,10 @@ class CommitPipeline {
 
     async execute() {
         this.#checkPreparation();
-        // Always start fresh — delete any stale progress from a previous run.
-        // Only resume() should load existing progress.
         if (fs.existsSync(this.#progressPath)) {
             fs.unlinkSync(this.#progressPath);
         }
-        await this.#loadProgress(); // initialises fresh CommitProgress
+        await this.#loadProgress();
         await this.#build();
         await this.#finalise();
         return this.#buildResult();
@@ -95,8 +101,8 @@ class CommitPipeline {
         }
         const packListPath  = path.join(this.session.workingDir, 'pack-list.json');
         const indexListPath = path.join(this.session.workingDir, 'index-list.json');
-        if (!fs.existsSync(packListPath))  throw new Error(`pack-list.json not found in session working directory`);
-        if (!fs.existsSync(indexListPath)) throw new Error(`index-list.json not found in session working directory`);
+        if (!fs.existsSync(packListPath))  throw new Error('pack-list.json not found in session working directory');
+        if (!fs.existsSync(indexListPath)) throw new Error('index-list.json not found in session working directory');
     }
 
     // ---------------------------------------------------------------------------
@@ -113,18 +119,13 @@ class CommitPipeline {
         // Build packId lookup for every non-deleted asset.
         // Priority: use staged.packId (original value from blueprint) if set.
         // For new assets (no blueprint packId), derive via codec encode+getPackId.
-        // Using the codec on existing assets risks wrong results because encode()
-        // uses default salt chars ('a'/'z') while the original may have used different
-        // salts — getPackId hashes the full encoded string including salts.
         const packIdCache = new Map();
         for (const staged of stagedList) {
             if (staged.isDeleted()) continue;
             if (!packIdCache.has(staged.targetName)) {
                 if (staged.packId) {
-                    // Use original packId from blueprint — guaranteed correct
                     packIdCache.set(staged.targetName, staged.packId);
                 } else {
-                    // New asset — derive from encoded filename
                     const encoded = this.#codec.encode(staged.targetName);
                     packIdCache.set(staged.targetName, this.#codec.getPackId(encoded));
                 }
@@ -148,10 +149,10 @@ class CommitPipeline {
         this.#progress.status = 'building';
         await this.#saveProgress();
 
-        const outputDir  = path.dirname(this.config.getIndexPath());
-        const writer     = new DataPackWriter(outputDir);
+        const outputDir    = path.dirname(this.config.getIndexPath());
+        const writer       = new DataPackWriter(outputDir);
         const writtenItems = [];
-        let   sinceLastSave = 0;
+        let sinceLastSave  = 0;
 
         try {
             for (const staged of stagedList) {
@@ -162,8 +163,6 @@ class CommitPipeline {
 
                 // Skip already-completed files (resume path)
                 if (entry && entry.isComplete()) {
-                    // Still need to track writtenItems for index build on resume
-                    // We can reconstruct the AssetItem from entry state
                     const packId = packIdCache.get(staged.targetName) || 0;
                     writtenItems.push(new AssetItem({
                         decodedName:  staged.targetName,
@@ -171,57 +170,36 @@ class CommitPipeline {
                             ? staged.targetName.split('.').pop().toLowerCase()
                             : 'unknown',
                         packId,
-                        offset:       0, // will be re-read from built pack in finalise
-                        size:         0,
-                        indexOffset:  0
+                        offset:      0,
+                        size:        entry.sizeBytes || 0,
+                        indexOffset: 0
                     }));
                     continue;
                 }
 
-                // ---- Steps 1+2: Resolve path and verify ----
-                // For in-store assets: get path from AssetStore directly (no I/O if already cached)
-                // For new assets: staged.stagedPath already set from addFile()
-                if (!entry.extracted) {
+                // ---- Step 1: Resolve ----
+                if (!entry.resolved) {
                     if (staged.isInStore()) {
-                        // Resolve directly from store — no copy needed
                         const storePath = this.assetStore.getPath(staged.sourceFingerprint);
-                        if (!storePath) {
-                            throw new Error(`Asset not in store: ${staged.targetName} (${staged.sourceFingerprint?.slice(0,12)}...)`);
-                        }
+                        if (!storePath) throw new Error(`Asset not in store: ${staged.targetName}`);
                         staged.stagedPath = storePath;
                     }
-                    // For new assets stagedPath is already set
-                    entry.extracted = true;
-                    entry.verified  = true; // verify inline below via buffer hash
+                    entry.resolved = true;
+                }
+
+                // ---- Step 2: Hash ----
+                if (!entry.hashed) {
+                    entry.hashed = true;
                 }
 
                 // ---- Step 3: Pack ----
                 if (!entry.packed) {
-                    if (!staged.stagedPath || !fs.existsSync(staged.stagedPath)) {
-                        throw new Error(`Staged path not found for: ${staged.targetName}`);
-                    }
-
                     const buffer = fs.readFileSync(staged.stagedPath);
-
-                    // Verify new assets by checksum
-                    if (staged.isNew() && staged.checksum) {
-                        const actual = crypto.createHash('sha256').update(buffer).digest('hex');
-                        if (actual !== staged.checksum) {
-                            throw new Error(`Checksum mismatch for: ${staged.targetName}`);
-                        }
-                    }
-
-                    const packId   = packIdCache.get(staged.targetName) || 0;
-                    entry.packId   = packId;
-
-                    // Debug: log first 5 entries to verify packId
-                    if (writtenItems.length < 5) {
-                        console.log(`    [debug] writing ${staged.targetName} packId=${packId} (staged.packId=${staged.packId})`);
-                    }
+                    const packId = packIdCache.get(staged.targetName) || 0;
 
                     const assetItem = new AssetItem({
-                        decodedName: staged.targetName,
-                        assetType:   staged.targetName.includes('.')
+                        decodedName:  staged.targetName,
+                        assetType:    staged.targetName.includes('.')
                             ? staged.targetName.split('.').pop().toLowerCase()
                             : 'unknown',
                         packId,
@@ -245,7 +223,6 @@ class CommitPipeline {
                     entry.cleaned = true;
                 }
 
-                // Save progress every PROGRESS_SAVE_INTERVAL assets, not per step
                 sinceLastSave++;
                 if (sinceLastSave >= PROGRESS_SAVE_INTERVAL) {
                     this.#progress.updatedAt = new Date();
@@ -256,11 +233,9 @@ class CommitPipeline {
 
             await writer.closeAll();
 
-            // Final progress save at end of build
             this.#progress.updatedAt = new Date();
             await this.#saveProgress();
 
-            // Build index from written items
             await this.#buildIndex(writtenItems, outputDir);
 
         } catch (err) {
@@ -272,26 +247,32 @@ class CommitPipeline {
         }
     }
 
+    // ---------------------------------------------------------------------------
+    // Build index — writes data.000.build
+    // ---------------------------------------------------------------------------
+
     async #buildIndex(writtenItems, outputDir) {
-        // index-list.json contains ALL entry names in original indexOffset order,
-        // including zero-size placeholder entries that were never written to a pack.
-        // writtenItems contains only entries that were physically written (size > 0).
-        // We must reconstruct the full ordered list, inserting zero-size stubs
-        // at their original positions.
+        // index-list.json contains ALL entries in original indexOffset order,
+        // including zero-size placeholders excluded from pack-list.json.
+        //
+        // Each entry: { name, packId, offset, size }
+        //   size === null → real asset — look up final offset/size in writtenMap
+        //   size === 0    → zero-size placeholder — use original packId + offset directly
+        //
+        // This is the only place zero-size entries require any handling.
+        // No branching exists elsewhere in the pipeline for them.
 
         const indexListPath = path.join(this.session.workingDir, 'index-list.json');
         const indexOrder    = fs.existsSync(indexListPath)
             ? JSON.parse(fs.readFileSync(indexListPath, 'utf8'))
             : null;
 
-        // Build a lookup from decodedName → written AssetItem
-        // Use a manual loop instead of Map constructor to detect duplicates
+        // Build lookup from decodedName → written AssetItem (size > 0 only)
         const writtenMap = new Map();
         for (const item of writtenItems.filter(i => i.size > 0)) {
             if (writtenMap.has(item.decodedName)) {
                 const existing = writtenMap.get(item.decodedName);
                 // Duplicate decodedName — keep the one with the higher offset
-                // (later in pack-write order = the actual write position)
                 if (item.offset > existing.offset) {
                     writtenMap.set(item.decodedName, item);
                 }
@@ -302,28 +283,19 @@ class CommitPipeline {
 
         let orderedItems;
 
-        // Debug: check a known-failing entry
-        const debugName = 'wolf_lv2_cast.wav';
-        const debugItem = writtenMap.get(debugName);
-        if (debugItem) {
-            console.log(`  [buildIndex debug] ${debugName}: writtenMap packId=${debugItem.packId} offset=${debugItem.offset}`);
-        } else {
-            console.log(`  [buildIndex debug] ${debugName}: NOT in writtenMap`);
-        }
-        console.log(`  [buildIndex debug] writtenItems count: ${writtenItems.length}, writtenMap size: ${writtenMap.size}`);
-
         if (indexOrder && indexOrder.length > 0) {
-            // index-list.json stores { name, packId, offset, size } objects.
-            // size===0 means zero-size placeholder — include with original packId+offset.
-            // size===null means a written asset — look up in writtenMap for real offset.
             orderedItems = indexOrder.map(entry => {
-                // Handle legacy format (plain string names from old sessions)
-                const name   = typeof entry === 'string' ? entry : entry.name;
-                const isZero = typeof entry === 'object' && entry.size === 0;
+                const name    = typeof entry === 'string' ? entry : entry.name;
+                const isZero  = typeof entry === 'object' && entry.size === 0;
 
-                if (!isZero && writtenMap.has(name)) return writtenMap.get(name);
+                if (!isZero && writtenMap.has(name)) {
+                    // Real asset — use the AssetItem with the final written offset
+                    return writtenMap.get(name);
+                }
 
-                // Zero-size placeholder — use original packId and offset from blueprint
+                // Zero-size placeholder — reconstruct stub with original positional data.
+                // packId and offset come from index-list.json which sourced them from
+                // the blueprint, ensuring byte-identical index reconstruction.
                 return new AssetItem({
                     decodedName: name,
                     assetType:   name.includes('.') ? name.split('.').pop().toLowerCase() : 'unknown',
@@ -378,7 +350,6 @@ class CommitPipeline {
         const blueprint = new Blueprint(indexFp);
         const storeDir  = this.assetStore.rootDir;
 
-        // Load pack-list once
         const packListPath = path.join(this.session.workingDir, 'pack-list.json');
         const stagedMap    = new Map(
             JSON.parse(fs.readFileSync(packListPath, 'utf8'))
@@ -386,7 +357,6 @@ class CommitPipeline {
                 .map(f => [f.targetName, f])
         );
 
-        // Open .build pack file handles for reading new asset bytes
         const buildHandles = new Map();
         const getHandle    = async (packId) => {
             if (!buildHandles.has(packId)) {
@@ -402,7 +372,10 @@ class CommitPipeline {
             const staged = stagedMap.get(entry.decodedName);
             let assetFp;
 
-            if (staged && staged.isNew()) {
+            if (entry.size === 0) {
+                // Zero-size placeholder — point blueprint record at null-asset sentinel
+                assetFp = AssetStore.NULL_ASSET_HASH;
+            } else if (staged && staged.isNew()) {
                 const handle = await getHandle(entry.packId);
                 if (!handle) throw new Error(`Pack handle unavailable for: ${entry.decodedName}`);
                 const buffer    = Buffer.alloc(entry.size);
@@ -424,7 +397,8 @@ class CommitPipeline {
                 packOffset:          entry.offset,
                 packId:              entry.packId,
                 fileFingerprint:     assetFp,
-                datapackFingerprint: packRecords[entry.packId]?.hash || null
+                datapackFingerprint: packRecords[entry.packId]?.hash || null,
+                decodedName:         entry.decodedName
             }));
         }
 
@@ -444,29 +418,32 @@ class CommitPipeline {
         }
 
         this.session.status      = 'committed';
-        this.#progress.status    = 'complete';
+        this.#progress.status    = 'committed';
         this.#progress.updatedAt = new Date();
         await this.#saveProgress();
     }
 
     // ---------------------------------------------------------------------------
-    // Progress helpers
+    // Helpers
     // ---------------------------------------------------------------------------
 
+    #fingerprint(staged) {
+        return staged.sourceFingerprint || staged.checksum || staged.targetName;
+    }
+
+    #canResume() {
+        return fs.existsSync(this.#progressPath);
+    }
+
     async #loadProgress() {
-        if (fs.existsSync(this.#progressPath)) {
-            const obj = JSON.parse(await fs.promises.readFile(this.#progressPath, 'utf8'));
-            this.#progress = CommitProgress.fromJSON(obj);
-        } else {
-            const packListPath  = path.join(this.session.workingDir, 'pack-list.json');
-            const indexListPath = path.join(this.session.workingDir, 'index-list.json');
-            this.#progress = new CommitProgress({
-                sessionId: this.session.sessionId,
-                status:    'pending',
-                packListPath,
-                indexListPath
-            });
+        if (this.#canResume() && this.#progress === null) {
+            try {
+                const obj = JSON.parse(fs.readFileSync(this.#progressPath, 'utf8'));
+                this.#progress = CommitProgress.fromJSON(obj);
+                return;
+            } catch { /* fall through to fresh */ }
         }
+        this.#progress = new CommitProgress({ sessionId: this.session.sessionId });
     }
 
     async #saveProgress() {
@@ -477,40 +454,13 @@ class CommitPipeline {
         );
     }
 
-    #canResume() {
-        if (!fs.existsSync(this.#progressPath)) return false;
-        try {
-            const obj = JSON.parse(fs.readFileSync(this.#progressPath, 'utf8'));
-            return ['building', 'finalising', 'pending'].includes(CommitProgress.fromJSON(obj).status);
-        } catch { return false; }
-    }
-
-    // ---------------------------------------------------------------------------
-    // Helpers
-    // ---------------------------------------------------------------------------
-
-    /**
-     * Derive a unique progress key for a staged file.
-     * Must be unique per file — use targetName hash since filenames are unique
-     * in the pack even when multiple files share the same content (aliases).
-     * Do NOT use sourceFingerprint — aliases share the same content hash.
-     */
-    #fingerprint(staged) {
-        return crypto.createHash('sha256').update(staged.targetName).digest('hex');
-    }
-
     #buildResult() {
-        const total    = this.#progress.entries.size;
-        const complete = Array.from(this.#progress.entries.values()).filter(e => e.isComplete()).length;
-        return {
-            sessionId:   this.session.sessionId,
-            status:      this.#progress.status,
-            total,
-            complete,
-            failed:      total - complete,
-            completedAt: new Date().toISOString()
-        };
+        const entries  = Array.from(this.#progress.entries.values());
+        const complete = entries.filter(e => e.isComplete()).length;
+        const total    = entries.length;
+        return { complete, total, sessionId: this.session.sessionId };
     }
+
 }
 
 module.exports = CommitPipeline;

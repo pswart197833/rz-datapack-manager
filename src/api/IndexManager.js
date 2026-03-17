@@ -5,7 +5,9 @@ const path             = require('path');
 const DataPackIndex    = require('../core/DataPackIndex');
 const DataPackReader   = require('../core/DataPackReader');
 const Blueprint        = require('../fingerprint/Blueprint');
+const BlueprintRecord  = require('../fingerprint/BlueprintRecord');
 const AssetItem        = require('../core/AssetItem');
+const AssetStore       = require('../core/AssetStore');
 
 /**
  * IndexManager
@@ -20,6 +22,14 @@ const AssetItem        = require('../core/AssetItem');
  *   2. Check for an existing Blueprint with that fingerprint
  *   3a. Blueprint found → skip parse, reconstruct AssetItem[] from blueprint
  *   3b. Blueprint not found → decrypt and parse data.000 the full way
+ *
+ * Zero-size entries:
+ *   Index entries with size === 0 are placeholder/deleted records that exist
+ *   in data.000 but have no bytes in any pack file. During blueprint generation
+ *   these are registered against the null-asset sentinel (AssetStore.NULL_ASSET_HASH)
+ *   so they flow through the pipeline as normal entries. DataPackWriter skips
+ *   writing them (empty buffer) but they still appear in the reconstructed index
+ *   with their original packId and offset preserved.
  *
  * All path concerns delegated to PackConfiguration.
  * FingerprintStore and AssetStore injected at construction.
@@ -73,7 +83,7 @@ class IndexManager {
         const indexFingerprint = await Blueprint.fingerprintFile(indexPath);
 
         // Step 2 — check for an existing blueprint
-        const storeDir        = this.assetStore.rootDir;
+        const storeDir          = this.assetStore.rootDir;
         const existingBlueprint = await Blueprint.loadFromDisk(storeDir, indexFingerprint);
 
         this.#index = new DataPackIndex();
@@ -100,6 +110,10 @@ class IndexManager {
         this.#index.parse(indexBuffer);
         console.log(`  ${this.#index.entries.length.toLocaleString()} entries parsed`);
 
+        // Ensure null-asset sentinel exists before blueprint generation
+        // so zero-size entries get a real FingerprintRecord pointing to it.
+        await this.fingerprintStore.ensureNullAsset();
+
         // Register the index file itself in FingerprintStore
         await this.fingerprintStore.register(indexBuffer, 'index', 'data.000', null);
 
@@ -122,41 +136,45 @@ class IndexManager {
             }
         }
 
-        // Build and save blueprint
-        // Open a write stream so 124k stub registrations use one stream
-        // instead of 124k individual appendFile() calls (~98s vs ~2s)
+        // Build and save blueprint.
+        // Open a write stream so 124k registrations use one stream
+        // instead of 124k individual appendFile() calls (~98s vs ~2s).
         console.log('  Building blueprint...');
         await this.fingerprintStore.openWriteStream();
         const blueprint = new Blueprint(indexFingerprint);
 
+        const nullHash    = AssetStore.NULL_ASSET_HASH;
+        const nullPath    = this.assetStore.getPath(nullHash);
+
         for (const entry of this.#index.entries) {
             const packRecord = packRecords[entry.packId];
+            let assetRecord;
 
-            // Register asset in FingerprintStore with a stub buffer for hashing.
-            // Pass the real size from the index entry so FingerprintRecord.size is correct
-            // even though the stub buffer itself is tiny.
-            // Real content hash will be updated during extractAll().
-            const stubBuffer = Buffer.from(`${entry.decodedName}|${entry.offset}|${entry.size}`);
-            const assetRecord = await this.fingerprintStore.register(
-                stubBuffer, 'asset', entry.decodedName, null, entry.size
-            );
+            if (entry.size === 0) {
+                // Zero-size placeholder — point to the null-asset sentinel.
+                // Register as an alias of the sentinel using the entry's own decodedName
+                // so it gets its own FingerprintRecord that resolveFile() can find by name.
+                const nullBuffer = Buffer.alloc(0);
+                assetRecord = await this.fingerprintStore.register(
+                    nullBuffer, 'asset', entry.decodedName, nullPath, 0
+                );
+            } else {
+                // Normal entry — register a stub with a unique hash derived from
+                // name+offset+size. Real content hash is filled in by extractAll().
+                const stubBuffer = Buffer.from(`${entry.decodedName}|${entry.offset}|${entry.size}`);
+                assetRecord = await this.fingerprintStore.register(
+                    stubBuffer, 'asset', entry.decodedName, null, entry.size
+                );
+            }
 
-            blueprint.addRecord({
+            blueprint.addRecord(new BlueprintRecord({
                 indexOffset:         entry.indexOffset,
                 packOffset:          entry.offset,
                 packId:              entry.packId,
                 fileFingerprint:     assetRecord.hash,
                 datapackFingerprint: packRecord ? packRecord.hash : null,
-                toJSON() {
-                    return {
-                        indexOffset:         this.indexOffset,
-                        packOffset:          this.packOffset,
-                        packId:              this.packId,
-                        fileFingerprint:     this.fileFingerprint,
-                        datapackFingerprint: this.datapackFingerprint
-                    };
-                }
-            });
+                decodedName:         entry.decodedName
+            }));
         }
 
         await this.fingerprintStore.closeWriteStream();
@@ -177,6 +195,7 @@ class IndexManager {
     /**
      * Extract all assets from the pack files.
      * Skips assets already present in the AssetStore (deduplication).
+     * Zero-size entries are counted as skipped — they have no bytes to extract.
      *
      * @param {object}   opts
      * @param {string[]} [opts.types]      - Filter by asset type e.g. ['dds','tga']
@@ -205,7 +224,9 @@ class IndexManager {
 
                 if (onProgress) onProgress(i, total, entry.decodedName);
 
-                // Skip zero-size entries
+                // Zero-size entries have no bytes in any pack file.
+                // They are already registered against the null-asset sentinel
+                // during loadIndex() — nothing more to do here.
                 if (entry.size === 0) { skipped++; continue; }
 
                 try {
@@ -243,7 +264,7 @@ class IndexManager {
         if (onProgress) onProgress(total, total, 'done');
 
         // After extraction: prune stub records and rebuild blueprint with real hashes.
-        // loadIndex() registers 124k stub entries (hash of "name|offset|size").
+        // loadIndex() registers stub entries (hash of "name|offset|size").
         // extractAll() registers real entries (hash of actual content).
         // Pruning stubs removes the phantom records so store counts are accurate.
         if (extracted > 0) {
@@ -369,7 +390,6 @@ class IndexManager {
         if (!this.#index) await this.loadIndex();
 
         const indexPath        = this.config.getIndexPath();
-        const indexBuffer      = fs.readFileSync(indexPath);
         const indexFingerprint = await Blueprint.fingerprintFile(indexPath);
         const storeDir         = this.assetStore.rootDir;
 
@@ -379,13 +399,13 @@ class IndexManager {
             const fileRecord = this.fingerprintStore.getByName(entry.decodedName);
             if (!fileRecord) continue;
 
-            blueprint.addRecord(new (require('../fingerprint/BlueprintRecord'))({
+            blueprint.addRecord(new BlueprintRecord({
                 indexOffset:         entry.indexOffset,
                 packOffset:          entry.offset,
                 packId:              entry.packId,
                 fileFingerprint:     fileRecord.hash,
                 datapackFingerprint: null,
-                decodedName:         entry.decodedName  // store name directly for alias resolution
+                decodedName:         entry.decodedName
             }));
         }
 
@@ -402,8 +422,8 @@ class IndexManager {
 
     /** @param {PackConfiguration} config */
     setConfig(config) {
-        this.config  = config;
-        this.#index  = null; // force reload on next loadIndex()
+        this.config = config;
+        this.#index = null; // force reload on next loadIndex()
     }
 
     /** @returns {PackConfiguration} */

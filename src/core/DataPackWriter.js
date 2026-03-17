@@ -21,11 +21,17 @@ const CryptoProvider = require('../crypto/CryptoProvider');
  * Phase 2. CommitPipeline renames them in Phase 3 after successful build.
  *
  * Write streams are opened lazily on first addAsset() call for each slot.
+ *
+ * Zero-size entries:
+ *   When buffer.length === 0 the write is skipped entirely — no bytes go
+ *   to the pack file and no stream is opened. The returned AssetItem carries
+ *   the original packId and offset from the source entry so the index entry
+ *   is reconstructed correctly by CommitPipeline.#buildIndex().
  */
 
 class DataPackWriter {
 
-    static VERSION = 'v2-with-encryption'; // verify this is in src/core/DataPackWriter.js
+    static VERSION = 'v2-with-encryption';
 
     // Proprietary formats are stored raw — no XOR encryption.
     // All other formats must be XOR-encrypted before writing to the pack.
@@ -58,16 +64,34 @@ class DataPackWriter {
     /**
      * Stream an asset buffer to the correct pack file.
      * Opens the write stream lazily if not already open for this pack slot.
-     * Verifies the write completed fully before returning.
+     *
+     * Zero-size entries (buffer.length === 0): the write is skipped — no bytes
+     * go to the pack file. The returned AssetItem preserves the original packId
+     * and offset from the source entry so the index records are correct.
      *
      * Returns a new AssetItem with offset and size updated to reflect
      * where the asset was written in the output file.
      *
-     * @param {AssetItem} entry  - Source entry (packId used for routing)
-     * @param {Buffer}    buffer - Raw asset bytes to write
+     * @param {AssetItem} entry  - Source entry (packId and offset used for routing/passthrough)
+     * @param {Buffer}    buffer - Raw asset bytes to write (may be empty for zero-size entries)
      * @returns {Promise<AssetItem>} Updated AssetItem with final offset and size
      */
     async addAsset(entry, buffer) {
+        // Zero-size placeholder — preserve original positional data, skip pack write.
+        // These entries exist in data.000 but have no bytes in any pack file.
+        if (buffer.length === 0) {
+            return new AssetItem({
+                encodedName:  entry.encodedName,
+                decodedName:  entry.decodedName,
+                assetType:    entry.assetType,
+                packId:       entry.packId,
+                offset:       entry.offset,
+                size:         0,
+                indexOffset:  entry.indexOffset,
+                fingerprint:  entry.fingerprint
+            });
+        }
+
         const packId = entry.packId;
 
         // Open write stream lazily
@@ -141,8 +165,6 @@ class DataPackWriter {
 
     /**
      * Return the current byte offset for a given pack slot.
-     * Useful for verifying expected final file sizes.
-     *
      * @param {number} packId
      * @returns {number}
      */
@@ -163,13 +185,6 @@ class DataPackWriter {
     // Private helpers
     // ---------------------------------------------------------------------------
 
-    /**
-     * Open a write stream for a pack slot, creating the output file.
-     * Uses .build extension — CommitPipeline renames after successful build.
-     *
-     * @param {number} packId
-     * @returns {Promise<void>}
-     */
     async #openStream(packId) {
         if (!fs.existsSync(this.outputDir)) {
             fs.mkdirSync(this.outputDir, { recursive: true });
@@ -177,9 +192,8 @@ class DataPackWriter {
 
         const buildPath = this.getBuildPath(packId);
         const stream    = fs.createWriteStream(buildPath, { flags: 'w' });
-        stream.setMaxListeners(0); // multiple error/drain listeners added per write
+        stream.setMaxListeners(0);
 
-        // Wait for the stream to be ready
         await new Promise((resolve, reject) => {
             stream.on('open',  resolve);
             stream.on('error', reject);
@@ -189,13 +203,6 @@ class DataPackWriter {
         this.#currentOffsets.set(packId, 0);
     }
 
-    /**
-     * Write a buffer to a stream, respecting backpressure.
-     *
-     * @param {fs.WriteStream} stream
-     * @param {Buffer}         buffer
-     * @returns {Promise<void>}
-     */
     #writeBuffer(stream, buffer) {
         return new Promise((resolve, reject) => {
             const onError = (err) => reject(err);
@@ -204,8 +211,7 @@ class DataPackWriter {
                 if (err) reject(err);
                 else     resolve();
             });
-            if (ok) return; // completed synchronously — callback will resolve
-            // Backpressure — wait for drain
+            if (ok) return;
             const onDrain = () => {
                 stream.removeListener('error', onError);
                 resolve();
@@ -215,12 +221,6 @@ class DataPackWriter {
         });
     }
 
-    /**
-     * Finalise and close a write stream.
-     *
-     * @param {fs.WriteStream} stream
-     * @returns {Promise<void>}
-     */
     #closeStream(stream) {
         return new Promise((resolve, reject) => {
             stream.end(err => {

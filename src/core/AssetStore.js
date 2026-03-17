@@ -20,9 +20,27 @@ const VerificationResult = require('../fingerprint/VerificationResult');
  *
  * The in-memory #fileIndex is the hot path for all existence checks.
  * It is populated at construction via rebuild() and updated on every write.
+ *
+ * NULL_ASSET_HASH is the SHA-256 of an empty buffer — the sentinel used to
+ * represent zero-size index entries in the fingerprint and blueprint stores.
+ * These entries have real packId/offset data in the index but no bytes in
+ * the pack files. Pointing them at the sentinel makes the pipeline uniform
+ * and removes all special-case branching from SessionManager and CommitPipeline.
  */
 
 class AssetStore {
+
+    /**
+     * SHA-256 of an empty buffer — the sentinel hash for zero-size entries.
+     * Fixed by definition: crypto.createHash('sha256').update(Buffer.alloc(0)).digest('hex')
+     */
+    static NULL_ASSET_HASH = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+
+    /**
+     * The reserved decoded name used for the null-asset FingerprintRecord.
+     * Never appears as a real game filename.
+     */
+    static NULL_ASSET_NAME = '__null__';
 
     /**
      * @param {string} rootDir - Root directory for the asset store
@@ -69,6 +87,43 @@ class AssetStore {
                 }
             }
         }
+    }
+
+    /**
+     * Ensure the null-asset sentinel file exists in the store.
+     *
+     * Writes an empty file at the bucketed path for NULL_ASSET_HASH if it is
+     * not already present. This must be called once at application startup
+     * (before any blueprint generation or session open) so that zero-size
+     * index entries can be treated as normal store entries throughout the
+     * pipeline without any special-case branching.
+     *
+     * Safe to call multiple times — idempotent.
+     *
+     * @returns {string} The path to the null-asset file
+     */
+    ensureNullAsset() {
+        const hash    = AssetStore.NULL_ASSET_HASH;
+        const ext     = 'bin';
+
+        if (this.#fileIndex.has(hash)) {
+            return this.#fileIndex.get(hash);
+        }
+
+        const bucketDir = path.join(this.rootDir, hash.slice(0, 2));
+        const filePath  = path.join(bucketDir, `${hash}.${ext}`);
+
+        if (!fs.existsSync(bucketDir)) {
+            fs.mkdirSync(bucketDir, { recursive: true });
+        }
+
+        // Write empty file — idempotent if already on disk
+        if (!fs.existsSync(filePath)) {
+            fs.writeFileSync(filePath, Buffer.alloc(0));
+        }
+
+        this.#fileIndex.set(hash, filePath);
+        return filePath;
     }
 
     // ---------------------------------------------------------------------------
