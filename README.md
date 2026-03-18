@@ -54,6 +54,8 @@ Both the index and asset content use a proprietary XOR rolling cipher. Non-propr
 
 ### Reconstruction
 - Byte-identical reconstruction of all 8 pack files from a blueprint (~6 GB total)
+- data.000 index byte-identical reconstruction verified — 124,913 entries including 20,402 content aliases and 4 zero-size placeholders
+- `FilenameCodec` rewritten from original C++ source (`KFileNameCipher.cpp`) — salt characters are now deterministic, eliminating the packId serialization bug
 - Correct XOR re-encryption when writing assets back
 - Zero-size placeholder entries preserved at exact index positions
 
@@ -80,7 +82,7 @@ Both the index and asset content use a proprietary XOR rolling cipher. Non-propr
 | Blueprint generation and persistence | ✅ Production ready |
 | Session lifecycle (create, prepare, commit, resume) | ✅ Production ready |
 | Pack file reconstruction — all 8 packs byte-identical | ✅ Verified |
-| Index reconstruction — data.000 byte-identical | 🔧 Final bug (packId serialization) |
+| Index reconstruction — data.000 byte-identical | ✅ Verified |
 | UI — Archiver and Modder flows | ✅ Functional, redesign planned |
 | Version comparison across blueprints | 📋 Planned |
 | Asset preview | 📋 Planned |
@@ -95,6 +97,8 @@ Both the index and asset content use a proprietary XOR rolling cipher. Non-propr
 - **Frontend:** Bootstrap 5, vanilla JS
 - **Persistence:** JSON Lines (.jsonl) — migration path to SQL ready
 - **Crypto:** Custom XOR rolling cipher (matches game engine exactly)
+- **Filename codec:** Derived from original C++ `KFileNameCipher.cpp` — deterministic salt derivation, byte-identical round-trip verified
+
 
 ---
 
