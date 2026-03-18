@@ -132,13 +132,16 @@ class CommitPipeline {
             }
         }
 
-        // Initialise progress entries for all files not yet tracked
+        // Initialise progress entries for all files not yet tracked.
+        // CommitProgress.makeKey(name, hash) builds the composite key used
+        // for all lookups — same design as FingerprintStore primary key.
         for (const staged of stagedList) {
             if (staged.isDeleted()) continue;
-            const fp = this.#fingerprint(staged);
-            if (!this.#progress.entries.has(fp)) {
+            const hash = this.#fingerprint(staged);
+            const key  = CommitProgress.makeKey(staged.targetName, hash);
+            if (!this.#progress.entries.has(key)) {
                 this.#progress.addEntry(new ProgressEntry({
-                    fileFingerprint: fp,
+                    fileFingerprint: hash,
                     decodedName:     staged.targetName,
                     packId:          packIdCache.get(staged.targetName) || 0,
                     category:        staged.category
@@ -158,8 +161,9 @@ class CommitPipeline {
             for (const staged of stagedList) {
                 if (staged.isDeleted()) continue;
 
-                const fp    = this.#fingerprint(staged);
-                const entry = this.#progress.getEntry(fp);
+                const hash  = this.#fingerprint(staged);
+                const key   = CommitProgress.makeKey(staged.targetName, hash);
+                const entry = this.#progress.getEntry(key);
 
                 // Skip already-completed files (resume path)
                 if (entry && entry.isComplete()) {
@@ -427,8 +431,19 @@ class CommitPipeline {
     // Helpers
     // ---------------------------------------------------------------------------
 
+    /**
+     * Return the raw content hash for a staged file.
+     * This is stored as ProgressEntry.fileFingerprint.
+     *
+     * CommitProgress assembles the composite key name::hash internally,
+     * matching the FingerprintStore primary key design:
+     *   same name + same hash  -> same key   -> exact duplicate, skip
+     *   same name + diff hash  -> diff key   -> new version, track separately
+     *   diff name + same hash  -> diff key   -> alias, both written to pack
+     *   diff name + diff hash  -> diff key   -> unrelated files, both written
+     */
     #fingerprint(staged) {
-        return staged.sourceFingerprint || staged.checksum || staged.targetName;
+        return staged.sourceFingerprint || staged.checksum || '';
     }
 
     #canResume() {

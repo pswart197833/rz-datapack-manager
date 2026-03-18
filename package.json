@@ -23,7 +23,8 @@
     "diagnose:pipeline": "node test/diagnose-pipeline.js",
     "diagnose:packid2": "node test/diagnose-packid-trace.js",
     "diagnose:reference-codec": "node test/diagnose-reference-codec.js",
-    "diagnose:correct-codec" : "node test/diagnose-correct-codec.js"
+    "diagnose:correct-codec" : "node test/diagnose-correct-codec.js",
+    "diagnose:empty-buffer" : "node test/diagnose-empty-buffer.js"
   },
   "dependencies": {
     "cors": "^2.8.6",
