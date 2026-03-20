@@ -14,3 +14,7 @@ fingerprints.json
 .DS_Store
 Thumbs.db
 *.kate-swp
+
+# test data
+test/fixtures/expected/
+test/fixtures/sample-manifest.json
