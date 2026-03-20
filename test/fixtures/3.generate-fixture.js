@@ -1,74 +1,390 @@
-const fs = require('fs');
-const path = require('path');
-const readline = require('readline');
+'use strict';
+/**
+ * test/fixtures/3.generate-fixture.js
+ *
+ * Step 3 of 3 — Creates a session populated from the fixture store,
+ * then runs the full commit pipeline to produce:
+ *
+ *   test/fixtures/data/
+ *     data.000          ← encrypted index
+ *     data.001–.008     ← pack files (empty slots are 0 bytes)
+ *
+ *   test/fixtures/expected/
+ *     entries.json      ← every decoded index entry with known values
+ *     hashes.json       ← SHA-256 of data.000 and each pack file
+ *     pack-map.json     ← name → { packId, offset, size, contentHash }
+ *
+ * The generated files are committed to the repo so unit tests run with
+ * no dependency on real game data.
+ *
+ * Usage (from project root):
+ *   node test/fixtures/3.generate-fixture.js
+ *   node test/fixtures/3.generate-fixture.js --clean   (wipe data/ first)
+ */
 
-// Core Imports
-const PackConfiguration = require('../../src/config/PackConfiguration');
-const SessionManager = require('../../src/session/SessionManager');
-const AssetStore = require('../../src/core/AssetStore');
-const FingerprintStore = require('../../src/fingerprint/FingerprintStore');
+const fs     = require('fs');
+const path   = require('path');
+const crypto = require('crypto');
 
-async function generateFixturePacks() {
-    const fixtureDataDir = path.resolve(__dirname, 'data');
-    const fixtureStoreDir = path.resolve(__dirname, 'store');
-    const fixtureSessionDir = path.resolve(__dirname, 'sessions');
-    const fixtureFingerprintsPath = path.join(fixtureStoreDir, 'fingerprints.jsonl');
+// ---------------------------------------------------------------------------
+// Args
+// ---------------------------------------------------------------------------
 
-    // 1. Setup the Test Configuration
-    const config = new PackConfiguration(fixtureDataDir, fixtureStoreDir, fixtureSessionDir);
-    config.indexPath = path.join(fixtureDataDir, 'data.000');
-
-    for (let i = 1; i <= 8; i++) {
-        config.packPaths.set(i, path.join(fixtureDataDir, `data.00${i}`));
-    }
-
-    // 2. Initialize Core Stores
-    const assetStore = new AssetStore(fixtureStoreDir);
-    const fingerprintStore = new FingerprintStore(fixtureFingerprintsPath, fixtureStoreDir);
-
-    // Crucial: Load the mini-store data
-    await assetStore.rebuild();
-    await fingerprintStore.load(); // Ensure the registrar is ready
-
-    const sessionManager = new SessionManager(fixtureSessionDir, fingerprintStore, assetStore);
-
-    // 3. Create Session and Add from Store
-    console.log("Creating fixture build session...");
-    const session = await sessionManager.create(config, "Fixture Generation Build");
-
-    console.log("Populating session from fixture store records...");
-
-    const fileStream = fs.createReadStream(fixtureFingerprintsPath);
-    const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
-
-    for await (const line of rl) {
-        if (!line.trim()) continue;
-        const record = JSON.parse(line);
-
-        // Use the fingerprint to add the asset from the store
-        // This marks the StagedFile as 'in-store'
-        if (record.extractedPath != null && record.type == 'asset') {
-          await session.addFromStore(record.hash, record.decodedName);
+function parseArgs(argv) {
+    const args = {};
+    for (let i = 0; i < argv.length; i++) {
+        if (argv[i].startsWith('--')) {
+            const key = argv[i].slice(2);
+            const val = argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[++i] : true;
+            args[key] = val;
         }
     }
+    return args;
+}
 
-    // 4. Run the Commit Pipeline
-    console.log("Preparing commit pipeline...");
-    if (!fs.existsSync(fixtureDataDir)) fs.mkdirSync(fixtureDataDir, { recursive: true });
+const args = parseArgs(process.argv.slice(2));
 
-    await sessionManager.prepare(session.sessionId);
+// ---------------------------------------------------------------------------
+// Paths
+// ---------------------------------------------------------------------------
 
-    const result = await sessionManager.commit(session.sessionId);
+const FIXTURE_DIR   = path.join(__dirname, '..', '..', 'test', 'fixtures');
+const MANIFEST_PATH = path.join(FIXTURE_DIR, 'sample-manifest.json');
+const FIXTURE_STORE = path.join(FIXTURE_DIR, 'store');
+const FIXTURE_DATA  = path.join(FIXTURE_DIR, 'data');
+const FIXTURE_SES   = path.join(FIXTURE_DIR, 'sessions');
+const EXPECTED_DIR  = path.join(FIXTURE_DIR, 'expected');
 
-    console.log(result)
+const SRC = path.join(__dirname, '..', '..', 'src');
 
-    if (result.success) {
-        console.log("\n✅ Success! Test Fixture Created.");
-        console.log(`Location: ${fixtureDataDir}`);
-        console.log(`Total Assets Packed: ${result.stats.totalFiles}`);
-    } else {
-        console.error("\n❌ Build Failed:", result.error);
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function sha256(buf) {
+    return crypto.createHash('sha256').update(buf).digest('hex');
+}
+
+/**
+ * Resolve an extractedPath from the fixture JSONL.
+ * Paths in the JSONL are relative to FIXTURE_STORE.
+ * Returns an absolute path or null.
+ */
+function resolveStorePath(relOrAbsPath) {
+    if (!relOrAbsPath) return null;
+    if (path.isAbsolute(relOrAbsPath)) return relOrAbsPath;
+    return path.join(FIXTURE_STORE, relOrAbsPath);
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+(async () => {
+try {
+
+const PackConfiguration = require(path.join(SRC, 'config',      'PackConfiguration'));
+const AssetStore        = require(path.join(SRC, 'core',        'AssetStore'));
+const FingerprintStore  = require(path.join(SRC, 'fingerprint', 'FingerprintStore'));
+const DataPackIndex     = require(path.join(SRC, 'core',        'DataPackIndex'));
+const SessionManager    = require(path.join(SRC, 'session',     'SessionManager'));
+
+console.log('\n  Fixture Generator — Step 3 of 3');
+console.log('  ' + '─'.repeat(52));
+console.log(`  Fixture store:    ${FIXTURE_STORE}`);
+console.log(`  Fixture data out: ${FIXTURE_DATA}`);
+console.log('');
+
+// ---- Preflight checks ----
+if (!fs.existsSync(MANIFEST_PATH)) {
+    console.error(`  ERROR: sample-manifest.json not found. Run step 1 first.`);
+    process.exit(1);
+}
+const fixtureFpPath = path.join(FIXTURE_STORE, 'fingerprints.jsonl');
+if (!fs.existsSync(fixtureFpPath)) {
+    console.error(`  ERROR: fixture fingerprints.jsonl not found. Run step 2 first.`);
+    process.exit(1);
+}
+
+const manifest = JSON.parse(fs.readFileSync(MANIFEST_PATH, 'utf8'));
+
+// ---- Clean / create output dirs ----
+if (args.clean && fs.existsSync(FIXTURE_DATA)) {
+    fs.rmSync(FIXTURE_DATA, { recursive: true });
+    console.log('  Cleaned existing data/ directory.');
+}
+for (const dir of [FIXTURE_DATA, FIXTURE_SES, EXPECTED_DIR]) {
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
+
+// ---- Initialise fixture stores ----
+//
+// IMPORTANT: The fixture AssetStore points at FIXTURE_STORE.
+// extractedPath values in fingerprints.jsonl are RELATIVE to FIXTURE_STORE.
+// We patch them to absolute paths in memory after loading so the pipeline
+// can resolve them without any changes to the production code.
+
+const assetStore = new AssetStore(FIXTURE_STORE);
+await assetStore.rebuild();
+assetStore.ensureNullAsset();
+
+const fpStore = new FingerprintStore(fixtureFpPath, assetStore);
+await fpStore.load();
+await fpStore.ensureNullAsset();
+
+// Patch relative extractedPaths to absolute paths.
+// FingerprintStore loads records as-is from disk. Since the fixture JSONL
+// stores relative paths, we iterate all loaded records and resolve them.
+for (const record of fpStore.list()) {
+    if (record.extractedPath && !path.isAbsolute(record.extractedPath)) {
+        record.extractedPath = resolveStorePath(record.extractedPath);
+    }
+}
+// Also patch AssetStore's internal index: rebuild() populated it from disk
+// using the relative paths in filenames. Since AssetStore scans the directory
+// itself it should have correct absolute paths — but call rebuild once more
+// with the absolute root to be safe.
+await assetStore.rebuild();
+
+console.log(`  FingerprintStore: ${fpStore.list('asset').length} asset records loaded`);
+console.log(`  AssetStore:       ${fpStore.list('asset').filter(r => assetStore.exists(r.hash)).length} hashes resolvable`);
+console.log('');
+
+// ---- Build PackConfiguration pointing at fixture data output dir ----
+const fixtureConfig = new PackConfiguration({
+    indexPath:     path.join(FIXTURE_DATA, 'data.000'),
+    packPaths:     new Map(Array.from({ length: 8 }, (_, i) => [
+        i + 1, path.join(FIXTURE_DATA, `data.00${i + 1}`)
+    ])),
+    assetStoreDir: FIXTURE_STORE,
+    sessionsDir:   FIXTURE_SES
+});
+
+// ---- Create session ----
+const sessionManager = new SessionManager(FIXTURE_SES, fpStore, assetStore);
+const session = await sessionManager.create(fixtureConfig, 'Fixture Generation Build');
+console.log(`  Session created: ${session.sessionId}`);
+
+// ---- Add all entries from the manifest to the session ----
+//
+// Processing order:
+//   1. Normal entries       — addFromStore(hash, name)
+//   2. Content aliases      — addFromStore(canonicalHash, aliasName)
+//      The alias has the SAME bytes as the canonical entry but its own
+//      FingerprintRecord. We use the canonical hash since that is what
+//      AssetStore has the file under.
+//   3. Zero-size entries    — addFromStore(NULL_ASSET_HASH, name)
+//   4. Exact duplicate entries — addFromStore(hash, name)
+//      The duplicate is the same name appearing twice in the index.
+//      We call addFromStore once — it replaces any prior staging for
+//      that name (Session._fileMap upsert). The CommitPipeline will
+//      write the bytes and produce a single index entry. To get the
+//      duplicate entry into the index we would need to manipulate
+//      pack-list and index-list directly, which is beyond the scope
+//      of what the fixture generator should do. Instead we record the
+//      duplicate names in the manifest so unit tests can assert on them
+//      at the DataPackIndex level using the raw real index.
+
+const NULL_HASH = AssetStore.NULL_ASSET_HASH;
+
+let addedOk      = 0;
+let addedSkipped = 0;
+
+// Helper: add a file from store, logging any skips
+function tryAddFromStore(hash, name) {
+    if (!hash) {
+        console.log(`    SKIP (no hash): ${name}`);
+        addedSkipped++;
+        return;
+    }
+    if (!assetStore.exists(hash)) {
+        console.log(`    SKIP (not in store): ${name}  hash=${hash.slice(0,16)}...`);
+        addedSkipped++;
+        return;
+    }
+    session.addFromStore(hash, name);
+    addedOk++;
+}
+
+// 1. Normal entries
+console.log('  Adding normal entries...');
+for (const files of Object.values(manifest.types)) {
+    for (const f of files) {
+        tryAddFromStore(f.contentHash, f.originalName);
     }
 }
 
-generateFixturePacks().catch(console.error);
+// 2. Content aliases
+console.log('  Adding alias entries...');
+for (const a of (manifest.aliases || [])) {
+    // The alias's content hash IS the canonical hash (same bytes).
+    // Look up the alias's own FingerprintRecord to get its hash.
+    const aliasRecord = fpStore.getByName(a.aliasName);
+    if (aliasRecord) {
+        // Use aliasRecord.hash — FingerprintStore registered the alias with its own
+        // primary key name::hash. The actual file on disk is the canonical file,
+        // linked via aliasOf. AssetStore.getPath(aliasRecord.hash) may or may not
+        // return a path if the alias is stored as a symlink/copy.
+        // Safe fallback: use the canonical hash we know is in the store.
+        const resolvedHash = assetStore.exists(aliasRecord.hash)
+            ? aliasRecord.hash
+            : a.contentHash;
+        tryAddFromStore(resolvedHash, a.aliasName);
+    } else {
+        // No FingerprintRecord for the alias name — fall back to canonical hash
+        tryAddFromStore(a.contentHash, a.aliasName);
+    }
+    // Ensure the canonical is also staged (may already be from normal entries)
+    const canonRecord = fpStore.getByName(a.canonicalName);
+    if (canonRecord && !session.listFiles().find(f => f.targetName === a.canonicalName)) {
+        tryAddFromStore(canonRecord.hash, a.canonicalName);
+    }
+}
+
+// 3. Zero-size entries
+console.log('  Adding zero-size entries...');
+for (const z of (manifest.zeroSize || [])) {
+    tryAddFromStore(NULL_HASH, z.name);
+}
+
+// Note: exact duplicates are NOT staged as separate session entries —
+// they share a name with a normal entry (same decodedName, same bytes,
+// same pack location). The Session._fileMap is keyed by targetName so
+// you cannot have two staged entries with the same name. The duplicate
+// scenario is exercised by DataPackIndex tests that parse a real index
+// containing both entries.
+
+const allStaged = session.listFiles().filter(f => !f.isDeleted());
+console.log('');
+console.log(`  Staged: ${addedOk} entries  (${addedSkipped} skipped)`);
+console.log(`  Session total: ${allStaged.length} active staged files`);
+console.log('');
+
+if (allStaged.length === 0) {
+    console.error('  ERROR: No files staged — cannot generate fixture. Check step 2 output.');
+    process.exit(1);
+}
+
+// ---- Run the commit pipeline ----
+console.log('  Preparing session...');
+await sessionManager.prepare(session.sessionId);
+console.log(`  Status: ${session.status}`);
+
+console.log('  Committing (building pack files)...');
+const t      = Date.now();
+const result = await sessionManager.commit(session.sessionId);
+const elapsed = Date.now() - t;
+console.log(`  Done in ${elapsed}ms  —  status: ${result.status || 'complete'}  complete: ${result.complete}/${result.total}`);
+console.log('');
+
+// ---- Verify data.000 was written ----
+const indexPath = path.join(FIXTURE_DATA, 'data.000');
+if (!fs.existsSync(indexPath)) {
+    console.error('  ERROR: data.000 was not created. Check pipeline output above.');
+    process.exit(1);
+}
+
+// Ensure all 8 pack slots exist (empty slots → empty files for consistent fixture layout)
+for (let slot = 1; slot <= 8; slot++) {
+    const packPath = path.join(FIXTURE_DATA, `data.00${slot}`);
+    if (!fs.existsSync(packPath)) {
+        fs.writeFileSync(packPath, Buffer.alloc(0));
+    }
+}
+
+// ---- Parse output index and build expected/ files ----
+console.log('  Building expected/ manifest files...');
+
+const indexBuf   = fs.readFileSync(indexPath);
+const indexHash  = sha256(indexBuf);
+const parsedIndex = new DataPackIndex();
+parsedIndex.parse(indexBuf);
+
+console.log(`  data.000: ${parsedIndex.entries.length} entries parsed  sha256=${indexHash.slice(0,16)}...`);
+
+// entries.json
+const expectedEntries = parsedIndex.entries.map(e => ({
+    decodedName:  e.decodedName,
+    assetType:    e.assetType,
+    packId:       e.packId,
+    offset:       e.offset,
+    size:         e.size,
+    indexOffset:  e.indexOffset,
+    isZeroSize:   e.size === 0
+}));
+fs.writeFileSync(
+    path.join(EXPECTED_DIR, 'entries.json'),
+    JSON.stringify(expectedEntries, null, 2)
+);
+
+// hashes.json
+const hashes = {
+    generatedAt: new Date().toISOString(),
+    seed:        manifest.seed ?? 0,
+    'data.000':  indexHash
+};
+for (let slot = 1; slot <= 8; slot++) {
+    const packPath = path.join(FIXTURE_DATA, `data.00${slot}`);
+    const packBuf  = fs.readFileSync(packPath);
+    hashes[`data.00${slot}`] = sha256(packBuf);
+}
+fs.writeFileSync(
+    path.join(EXPECTED_DIR, 'hashes.json'),
+    JSON.stringify(hashes, null, 2)
+);
+
+// pack-map.json — name → { packId, offset, size, contentHash }
+const packMap = {};
+for (const e of parsedIndex.entries) {
+    const rec = fpStore.getByName(e.decodedName);
+    packMap[e.decodedName] = {
+        packId:      e.packId,
+        offset:      e.offset,
+        size:        e.size,
+        contentHash: rec ? rec.hash : null
+    };
+}
+fs.writeFileSync(
+    path.join(EXPECTED_DIR, 'pack-map.json'),
+    JSON.stringify(packMap, null, 2)
+);
+
+// ---- Final summary ----
+const zeroCount  = parsedIndex.entries.filter(e => e.size === 0).length;
+const usedPacks  = new Set(parsedIndex.entries.filter(e => e.size > 0).map(e => e.packId));
+const typeBreakdown = {};
+for (const e of parsedIndex.entries) {
+    const t = e.assetType || 'unknown';
+    typeBreakdown[t] = (typeBreakdown[t] || 0) + 1;
+}
+
+console.log('');
+console.log('  ── Fixture Summary ──────────────────────────────────');
+console.log(`  Index entries:   ${parsedIndex.entries.length}`);
+console.log(`  Zero-size:       ${zeroCount}`);
+console.log(`  Pack slots used: ${[...usedPacks].sort((a,b)=>a-b).map(p=>`data.00${p}`).join(', ')}`);
+console.log('');
+console.log('  Type breakdown:');
+for (const [type, count] of Object.entries(typeBreakdown).sort((a, b) => b[1] - a[1])) {
+    console.log(`    .${type.padEnd(8)} ${count}`);
+}
+console.log('');
+console.log('  Output files:');
+[
+    path.join(FIXTURE_DATA, 'data.000'),
+    path.join(EXPECTED_DIR, 'entries.json'),
+    path.join(EXPECTED_DIR, 'hashes.json'),
+    path.join(EXPECTED_DIR, 'pack-map.json')
+].forEach(f => console.log(`    ${f}`));
+console.log('');
+console.log('  ✓ Fixture generation complete.\n');
+
+// Clean up session working directory
+try { await sessionManager.discard(session.sessionId); } catch { /* non-fatal */ }
+
+} catch (err) {
+    console.error('\n[ERROR]', err.message);
+    console.error(err.stack);
+    process.exit(1);
+}
+})();
