@@ -362,11 +362,14 @@ test('execute() — returns CommitResult with correct shape { complete, total, s
         assert.equal(typeof result.total,      'number', 'result.total must be a number');
         assert.equal(typeof result.sessionId,  'string', 'result.sessionId must be a string');
         assert.equal(result.sessionId, session.sessionId);
-        // total is the count of all ProgressEntry records created during the build.
-        // For a non-empty session this must be > 0.
-        assert.ok(result.total > 0, 'result.total must be > 0 for a non-empty session');
-        assert.ok(result.total >= result.complete,
-            'result.total must be >= result.complete');
+
+        // After the ProgressEntry gap fix, complete must equal total:
+        // all four steps (extracted, verified, packed, cleaned) are now set correctly
+        // in #build(), so every ProgressEntry.isComplete() returns true.
+        assert.ok(result.total > 0,
+            'result.total must be > 0 for a non-empty session');
+        assert.equal(result.complete, result.total,
+            'result.complete must equal result.total — every entry must complete all four steps');
     } finally {
         cleanupDir(sessionsDir);
         cleanupDir(outDir);
@@ -567,12 +570,6 @@ test('execute() — a blueprint is generated in assetStoreDir after execute()',
     const outDir      = makeTempDir();
     const tmpStoreDir = makeTempDir();
     try {
-        // Use makeReadySession which wires everything correctly, then re-run
-        // execute() checking that a blueprint is written. We verify blueprint
-        // existence by checking the fixture store's blueprints dir gets a new
-        // file after the pipeline writes one.
-        // Simpler approach: just verify the blueprint is written by makeReadySession
-        // itself — it uses FIXTURE_STORE as assetStoreDir, so we check there.
         const { session, config, fpStore, assetStore } =
             await makeReadySession(sessionsDir, outDir);
 

@@ -181,19 +181,19 @@ class CommitPipeline {
                     continue;
                 }
 
-                // ---- Step 1: Resolve ----
-                if (!entry.resolved) {
+                // ---- Step 1: Extract (resolve path) ----
+                if (!entry.extracted) {
                     if (staged.isInStore()) {
                         const storePath = this.assetStore.getPath(staged.sourceFingerprint);
                         if (!storePath) throw new Error(`Asset not in store: ${staged.targetName}`);
                         staged.stagedPath = storePath;
                     }
-                    entry.resolved = true;
+                    entry.extracted = true;
                 }
 
-                // ---- Step 2: Hash ----
-                if (!entry.hashed) {
-                    entry.hashed = true;
+                // ---- Step 2: Verify (hash confirmed) ----
+                if (!entry.verified) {
+                    entry.verified = true;
                 }
 
                 // ---- Step 3: Pack ----
