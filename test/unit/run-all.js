@@ -13,6 +13,7 @@
  */
 
 const { run }  = require('node:test');
+const { spec } = require('node:test/reporters');
 const path     = require('node:path');
 const fs       = require('node:fs');
 
@@ -33,11 +34,11 @@ console.log(`\nRunning ${testFiles.length} unit test file(s):\n`);
 testFiles.forEach(f => console.log('  ' + path.basename(f)));
 console.log('');
 
-// node:test `run` with file list — requires Node 18.9+
-const stream = run({ files: testFiles });
+const stream   = run({ files: testFiles });
+const reporter = new spec();
 
 stream.on('test:fail', () => {
     process.exitCode = 1;
 });
 
-stream.pipe(process.stdout);
+stream.compose(reporter).pipe(process.stdout);
