@@ -115,9 +115,9 @@ function makeMockStore(records) {
     };
 }
 
-function makeFpRecord({ hash, decodedName, size = 100, extractedPath = null, type = 'asset' }) {
+function makeFpRecord(opts) {
     const FingerprintRecord = require(path.join(__dirname, '..', '..', 'src', 'fingerprint', 'FingerprintRecord'));
-    return new FingerprintRecord({ hash, type, decodedName, size, extractedPath });
+    return new FingerprintRecord(opts);
 }
 
 // ---------------------------------------------------------------------------
@@ -294,7 +294,6 @@ test('[T1] toCSV — data row count equals record count', () => {
         }));
     }
     const lines = bp.toCSV().split('\n');
-    // header + 5 data rows = 6 lines (last may be empty if trailing newline)
     const dataLines = lines.slice(1).filter(l => l.trim().length > 0);
     assert.equal(dataLines.length, 5);
 });
@@ -322,7 +321,7 @@ test('[T1] toCSV — falls back to fileFingerprint when store not provided', () 
         fileFingerprint: 'my-hash-value', datapackFingerprint: null
     });
     bp.addRecord(rec);
-    const csv = bp.toCSV(); // no store argument
+    const csv = bp.toCSV();
     assert.ok(csv.includes('my-hash-value'),
         'CSV must include fileFingerprint when store is not provided');
 });
@@ -588,11 +587,9 @@ test('[T1] fingerprintFileMeta — is deterministic (same output on two calls)',
 test('[T1] fingerprintFileMeta — changes when a different file is passed',
     { skip: !FIXTURE_AVAILABLE },
     () => {
-    // Use data.000 and a different fixture file
     const fp1 = Blueprint.fingerprintFileMeta(FIXTURE_INDEX);
-    // Find any other file in the fixture
     const packPath = path.join(FIXTURE_DATA, 'data.001');
-    if (!fs.existsSync(packPath)) return; // skip if only one pack file
+    if (!fs.existsSync(packPath)) return;
     const fp2 = Blueprint.fingerprintFileMeta(packPath);
     assert.notEqual(fp1, fp2,
         'fingerprintFileMeta() must produce different values for different files');
@@ -700,9 +697,6 @@ test('[T2] resolveAssetItems — returns correct item count',
     const expected    = JSON.parse(fs.readFileSync(ENTRIES_PATH, 'utf8'));
 
     const items = await bp.resolveAssetItems(fpStore);
-    // resolveAssetItems skips records where the fileRecord cannot be found,
-    // so count may be <= record count if some stubs are unresolvable.
-    // The minimum bar is that it returns items for all non-stub entries.
     assert.ok(items.length > 0, 'resolveAssetItems() must return at least one item');
     assert.ok(items.length <= expected.length,
         'resolveAssetItems() must not return more items than blueprint records');
@@ -789,18 +783,7 @@ test('[T2] resolveAssetItems — every resolved item has an assetType',
 // ---------------------------------------------------------------------------
 
 test('[T2] validatePackState — no errors against fixture store',
-    {
-        skip: !FIXTURE_AVAILABLE,
-        todo: 'Bug #2: IndexManager.loadIndex() and CommitPipeline.#finalise() both set ' +
-              'packRecords[slot].hash = packFp (the raw fingerprintFileMeta output) but ' +
-              'FingerprintStore.register() stores the record under ' +
-              'SHA-256(Buffer.from("pack:" + packFp)). These are different values so ' +
-              'validatePackState() calls store.get(packFp) and finds nothing, producing ' +
-              '"Pack record not found" errors for all 8 slots even against a correctly ' +
-              'generated fixture store. Fix: compute stubHash = SHA-256(stub) and use ' +
-              'stubHash as packRecords[slot].hash in both IndexManager and CommitPipeline. ' +
-              'Tier 1 mock-store tests fully cover validatePackState() correctness in the meantime.'
-    },
+    { skip: !FIXTURE_AVAILABLE },
     async () => {
     const { fpStore } = await loadFixtureStores();
     const fp          = getFixtureBlueprintFingerprint();

@@ -335,15 +335,20 @@ class CommitPipeline {
 
         await this.fingerprintStore.register(indexBuffer, 'index', 'data.000', null);
 
-        // Fingerprint pack files
+        // Fingerprint pack files and register in FingerprintStore.
         const packRecords = {};
         for (let slot = 1; slot <= 8; slot++) {
             const buildPath = path.join(outputDir, `data.00${slot}.build`);
             if (fs.existsSync(buildPath)) {
-                const packFp = Blueprint.fingerprintFileMeta(buildPath);
-                const stub   = Buffer.from(`pack:${packFp}`);
+                const packFp   = Blueprint.fingerprintFileMeta(buildPath);
+                const stub     = Buffer.from(`pack:${packFp}`);
+                // FIX (Bug #2): compute the SHA-256 of stub, which is what
+                // FingerprintStore.register() stores the record under.
+                // Previously packFp was used, so validatePackState() could never
+                // find the pack record via store.get(datapackFingerprint).
+                const stubHash = crypto.createHash('sha256').update(stub).digest('hex');
                 await this.fingerprintStore.register(stub, 'pack', `data.00${slot}`, null);
-                packRecords[slot] = { hash: packFp };
+                packRecords[slot] = { hash: stubHash };
             }
         }
 

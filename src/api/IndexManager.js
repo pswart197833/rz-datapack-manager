@@ -2,6 +2,7 @@
 
 const fs               = require('fs');
 const path             = require('path');
+const crypto           = require('crypto');
 const DataPackIndex    = require('../core/DataPackIndex');
 const DataPackReader   = require('../core/DataPackReader');
 const Blueprint        = require('../fingerprint/Blueprint');
@@ -125,11 +126,16 @@ class IndexManager {
                 // Use metadata-based fingerprint for pack files.
                 // Full SHA-256 of ~1GB pack files takes ~5s each (43s total for 8 packs).
                 // size + mtime is sufficient for change detection on local single-user files.
-                const packFp = Blueprint.fingerprintFileMeta(packPath);
-                const stub   = Buffer.from(`pack:${packFp}`);
+                const packFp   = Blueprint.fingerprintFileMeta(packPath);
+                const stub     = Buffer.from(`pack:${packFp}`);
+                // FIX (Bug #2): compute the SHA-256 of stub, which is what
+                // FingerprintStore.register() will store the record under.
+                // Previously packFp (the raw fingerprintFileMeta output) was used,
+                // causing validatePackState() to always fail to find the pack record.
+                const stubHash = crypto.createHash('sha256').update(stub).digest('hex');
                 await this.fingerprintStore.register(stub, 'pack', `data.00${slot}`, null);
                 packRecords[slot] = {
-                    hash:        packFp,
+                    hash:        stubHash,
                     decodedName: `data.00${slot}`,
                     type:        'pack'
                 };

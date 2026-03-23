@@ -91,6 +91,14 @@ class SessionManager {
      * reconstruction but excluded from pack-list.json at prepare() time so
      * DataPackWriter never tries to write empty bytes.
      *
+     * FIX: StagedFile.sourceFingerprint is set to record.fileFingerprint (the hash
+     * stored in the blueprint) rather than fileRecord.hash (the getByName() result).
+     * getByName() is last-write-wins and may return a later real-content-hash record
+     * whose hash the AssetStore was never populated with (e.g. in a fixture store
+     * that only contains stub-hash files). The blueprint's own fileFingerprint always
+     * refers to the hash that was used when the blueprint was built, which is
+     * guaranteed to be resolvable in the AssetStore that was active at that time.
+     *
      * @param {string}            indexFingerprint - SHA-256 of data.000 to open from
      * @param {string}            storeDir         - Root store directory for blueprint lookup
      * @param {PackConfiguration} config           - Target pack configuration
@@ -119,18 +127,22 @@ class SessionManager {
         });
 
         // Pre-populate staged files from blueprint — lazily, no file I/O yet.
-        // Store the original packId from the blueprint record on each StagedFile
-        // so CommitPipeline can use the exact original pack assignment without
-        // re-encoding the filename (which would use wrong salt characters).
+        //
+        // sourceFingerprint is set to record.fileFingerprint — the hash the blueprint
+        // recorded when it was built — NOT fileRecord.hash from getByName().
+        // getByName() is last-write-wins: a later extractAll() may register a new
+        // real-content-hash record under the same name, making it the getByName()
+        // winner. That newer hash may not exist in the AssetStore (e.g. the fixture
+        // store only contains files under their stub hashes). Using record.fileFingerprint
+        // ensures the staged file always resolves via the hash the AssetStore knows about.
         for (const record of blueprint.getRecords()) {
             const fileRecord = record.resolveFile(this.fingerprintStore);
             if (!fileRecord) continue;
 
-            const staged = session.addFromStore(fileRecord.hash, fileRecord.decodedName);
+            // Use record.fileFingerprint (blueprint hash) — not fileRecord.hash (getByName winner)
+            const staged = session.addFromStore(record.fileFingerprint, fileRecord.decodedName);
             if (staged) {
-                staged.packId = record.packId;
-                // Preserve original pack offset so zero-size entries can be
-                // written to index-list.json with their exact original offset.
+                staged.packId     = record.packId;
                 staged.packOffset = record.packOffset;
             }
         }
