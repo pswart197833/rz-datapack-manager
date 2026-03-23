@@ -1,17 +1,17 @@
-const crypto = require('crypto');
 const fs = require('fs');
-const Blueprint = require('../src/fingerprint/Blueprint');
-
 const lines = fs.readFileSync('test/fixtures/store/fingerprints.jsonl','utf8')
 .split('\n').filter(l=>l.trim()).map(l=>JSON.parse(l));
-const packs = lines.filter(r=>r.type==='pack');
 
-const bpDir = 'test/fixtures/store/blueprints';
-const f = fs.readdirSync(bpDir)[0];
-const bp = JSON.parse(fs.readFileSync(bpDir+'/'+f,'utf8'));
-const dpFps = [...new Set(bp.records.map(r=>r.datapackFingerprint).filter(Boolean))];
+// Find all records for the failing name
+const name = 'ancientprieststorm_una_idle01_biped.naf';
+const byName = lines.filter(r => r.decodedName === name);
+console.log('Records for', name);
+byName.forEach(r => console.log(' isAlias='+r.isAlias, 'aliasOf='+r.aliasOf, 'hash='+r.hash.slice(0,16)));
 
-packs.forEach(p => {
-    const matchesDirect = dpFps.includes(p.hash);
-    console.log(p.decodedName, '| matches:', matchesDirect);
-});
+// Find all records sharing the same hash
+if (byName.length > 0) {
+    const hash = byName[0].hash;
+    const byHash = lines.filter(r => r.hash === hash);
+    console.log('\nAll records with hash', hash.slice(0,16)+'...');
+    byHash.forEach(r => console.log(' name='+r.decodedName, 'isAlias='+r.isAlias, 'aliasOf='+r.aliasOf));
+}
