@@ -66,6 +66,40 @@ function sha256(buf) {
 }
 
 /**
+ * Compute the real content hash for a fixture store record.
+ *
+ * FingerprintStore.getByName() returns the stub hash (sha256 of
+ * "name|offset|size") when extractAll() has not been run. To get the
+ * real content hash we read the physical file at extractedPath and
+ * hash it directly. This is always accurate regardless of whether
+ * extractAll() has been run.
+ *
+ * Falls back to rec.hash when no physical file is available (e.g.
+ * zero-size sentinel entries whose hash is correct by definition).
+ *
+ * @param {FingerprintRecord|null} rec
+ * @param {string}                 storeRoot - FIXTURE_STORE root for relative path resolution
+ * @returns {string|null}
+ */
+function realContentHash(rec, storeRoot) {
+    if (!rec) return null;
+
+    // Resolve extractedPath — may be relative to storeRoot
+    let filePath = rec.extractedPath;
+    if (filePath && !path.isAbsolute(filePath)) {
+        filePath = path.join(storeRoot, filePath);
+    }
+
+    if (filePath && fs.existsSync(filePath)) {
+        const buf = fs.readFileSync(filePath);
+        return sha256(buf);
+    }
+
+    // No physical file — fall back to stored hash (correct for null sentinel)
+    return rec.hash || null;
+}
+
+/**
  * Resolve an extractedPath from the fixture JSONL.
  * Paths in the JSONL are relative to FIXTURE_STORE.
  * Returns an absolute path or null.
@@ -247,13 +281,6 @@ for (const z of (manifest.zeroSize || [])) {
     tryAddFromStore(NULL_HASH, z.name);
 }
 
-// Note: exact duplicates are NOT staged as separate session entries —
-// they share a name with a normal entry (same decodedName, same bytes,
-// same pack location). The Session._fileMap is keyed by targetName so
-// you cannot have two staged entries with the same name. The duplicate
-// scenario is exercised by DataPackIndex tests that parse a real index
-// containing both entries.
-
 const allStaged = session.listFiles().filter(f => !f.isDeleted());
 console.log('');
 console.log(`  Staged: ${addedOk} entries  (${addedSkipped} skipped)`);
@@ -334,6 +361,12 @@ fs.writeFileSync(
 );
 
 // pack-map.json — name → { packId, offset, size, contentHash }
+//
+// contentHash is computed by reading the physical file at extractedPath
+// and hashing it directly. This produces the real content hash regardless
+// of whether the FingerprintRecord still holds a stub hash from loadIndex().
+// Falls back to rec.hash only when no physical file is available (e.g.
+// zero-size sentinel entries whose hash is correct by definition).
 const packMap = {};
 for (const e of parsedIndex.entries) {
     const rec = fpStore.getByName(e.decodedName);
@@ -341,7 +374,7 @@ for (const e of parsedIndex.entries) {
         packId:      e.packId,
         offset:      e.offset,
         size:        e.size,
-        contentHash: rec ? rec.hash : null
+        contentHash: realContentHash(rec, FIXTURE_STORE)
     };
 }
 fs.writeFileSync(

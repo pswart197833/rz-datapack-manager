@@ -100,14 +100,13 @@ function loadZeroEntries() {
 }
 
 /**
- * Build a map of decodedName → Set<string> of all known real content hashes.
+ * Build a map of decodedName → Set<string> of all known real content hashes
+ * from the fixture store files.
  *
- * pack-map.json contentHash holds stub hashes from loadIndex(), not real
- * content hashes. The fixture store files are the ground truth.
- *
- * Multiple real files can exist for the same decodedName (different versions —
- * same name, different hash). extractAsset() extracts whichever version ended
- * up in the fixture pack. The correct assertion is therefore:
+ * We read physical store files rather than pack-map.json contentHash values
+ * because multiple real files can exist for the same decodedName (different
+ * versions — same name, different hash). extractAsset() extracts whichever
+ * version ended up in the fixture pack. The correct assertion is therefore:
  *   extracted hash ∈ known hashes for this name.
  *
  * Returns Map<decodedName, Set<string>> — names with no store file are omitted.
@@ -157,9 +156,10 @@ const PROPRIETARY = new Set(['dds', 'tga', 'cob', 'naf', 'nx3', 'nfm']);
 test('extractAsset — SHA-256 of extracted bytes matches fixture store file hash for every non-zero entry',
     { skip: !FIXTURE_AVAILABLE },
     async () => {
-    // pack-map.json contentHash holds stub hashes from loadIndex(), not real
-    // content hashes. The fixture store files are the ground truth — decrypted
-    // bytes copied from the live store during fixture generation.
+    // We use physical store files as the source of truth rather than pack-map.json
+    // contentHash because a fixture can legitimately contain multiple versions of
+    // the same filename (same name, different hash). The correct assertion is that
+    // the extracted hash is a member of the known-hash set for that name.
     const packPaths = makePackPaths();
     const reader    = new DataPackReader(packPaths);
     const entries   = loadNonZeroEntries();
@@ -319,7 +319,6 @@ test('extractAsset — xml: first byte is printable ASCII "<" after extraction',
     try {
         const buf = await reader.extractAsset(entry.item);
         assert.ok(buf.length >= 1, 'xml buffer must have at least 1 byte');
-        // XML must start with '<' (0x3C) or BOM — check printable ASCII range
         const firstChar = String.fromCharCode(buf[0]);
         assert.ok(buf[0] >= 0x20 && buf[0] < 0x80,
             `xml first byte must be printable ASCII, got 0x${buf[0].toString(16)} ("${firstChar}")`);
@@ -340,9 +339,6 @@ test('extractAsset — cfg: first byte is printable ASCII after extraction',
     try {
         const buf = await reader.extractAsset(entry.item);
         assert.ok(buf.length >= 1, 'cfg buffer must have at least 1 byte');
-        // cfg files may start with 0x0D (CR) or 0x0A (LF) on Windows — these are
-        // valid line-ending bytes, not corruption. Accept any non-null byte < 0x80
-        // OR common whitespace control chars (0x09 tab, 0x0A LF, 0x0D CR).
         const firstByte = buf[0];
         const isTextStart = (firstByte >= 0x09 && firstByte <= 0x0D) ||
                             (firstByte >= 0x20 && firstByte < 0x80);
@@ -459,14 +455,12 @@ test('extractAsset — jpg extracted bytes differ from raw pack bytes (XOR was a
     try {
         const extracted = await reader.extractAsset(entry.item);
 
-        // Read the raw encrypted bytes directly from the pack file
         const packPath  = packPaths.get(entry.item.packId);
         const handle    = await fs.promises.open(packPath, 'r');
         const rawBuf    = Buffer.alloc(entry.item.size);
         await handle.read(rawBuf, 0, entry.item.size, entry.item.offset);
         await handle.close();
 
-        // Extracted (decrypted) must differ from raw (encrypted)
         assert.notEqual(sha256(extracted), sha256(rawBuf),
             'extracted jpg bytes must differ from raw pack bytes — XOR decryption must have been applied');
     } finally {
@@ -486,7 +480,6 @@ test('extractAsset — dds extracted bytes equal raw pack bytes (no XOR applied)
     try {
         const extracted = await reader.extractAsset(entry.item);
 
-        // Read raw bytes directly from pack
         const packPath = packPaths.get(entry.item.packId);
         const handle   = await fs.promises.open(packPath, 'r');
         const rawBuf   = Buffer.alloc(entry.item.size);
@@ -543,12 +536,13 @@ test('extractBatch — returned buffers have correct sizes',
     }
 });
 
-test('extractBatch — SHA-256 of each buffer matches pack-map contentHash',
+test('extractBatch — SHA-256 of each buffer matches fixture store file hash',
     { skip: !FIXTURE_AVAILABLE },
     async () => {
-    const packPaths = makePackPaths();
-    const reader    = new DataPackReader(packPaths);
-    // Use entries from different pack slots for coverage
+    // We use physical store files as the source of truth to handle the case
+    // where multiple valid hashes exist for the same filename.
+    const packPaths  = makePackPaths();
+    const reader     = new DataPackReader(packPaths);
     const allEntries = loadNonZeroEntries();
     const byPack     = new Map();
     for (const e of allEntries) {
@@ -560,7 +554,7 @@ test('extractBatch — SHA-256 of each buffer matches pack-map contentHash',
         const result = await reader.extractBatch(entries.map(e => e.item));
         for (const { name } of entries) {
             const knownHashes = STORE_HASH_MAP.get(name);
-            if (!knownHashes) continue; // no store file for this entry — skip
+            if (!knownHashes) continue;
             const buf  = result.get(name);
             const hash = sha256(buf);
             assert.ok(knownHashes.has(hash),
@@ -578,7 +572,6 @@ test('extractBatch — handles entries from multiple pack slots in one call',
     const reader     = new DataPackReader(packPaths);
     const allEntries = loadNonZeroEntries();
 
-    // Collect one entry per pack slot (up to 4 different slots)
     const byPack = new Map();
     for (const e of allEntries) {
         if (!byPack.has(e.item.packId) && byPack.size < 4) {
@@ -609,14 +602,9 @@ test('extractAsset — zero-size entry completes without error and returns empty
 
     const packPaths = makePackPaths();
     const reader    = new DataPackReader(packPaths);
-
-    // Use a zero-size entry — construct with packId from fixture but size=0
-    // DataPackReader should handle size=0 without attempting a pack file read
-    const { item } = zeroEntries[0];
+    const { item }  = zeroEntries[0];
 
     try {
-        // Zero-size entries have size=0 — extractAsset allocates a 0-byte buffer
-        // and reads 0 bytes, which is a no-op. Should not throw.
         await assert.doesNotReject(
             () => reader.extractAsset(item),
             'extractAsset must not throw for a zero-size entry'
@@ -693,7 +681,6 @@ test('validateAsset — returns { valid: true } for unknown/proprietary format (
     const packPaths = makePackPaths();
     const reader    = new DataPackReader(packPaths);
     const entries   = loadNonZeroEntries();
-    // Use a proprietary format — validateAsset passes through with valid=true
     const entry     = firstOfType(entries, 'naf', 'nx3', 'nfm', 'cob');
 
     assert.ok(entry, 'fixture must contain at least one proprietary format entry');
@@ -719,7 +706,6 @@ test('validateAsset — returns { valid: false, reason: string } for wrong magic
 
     assert.ok(entry, 'fixture must contain a jpg entry');
     try {
-        // Feed a buffer of zeros — wrong magic bytes for jpg
         const badBuf = Buffer.alloc(16, 0x00);
         const result = reader.validateAsset(entry.item, badBuf);
         assert.equal(result.valid, false,
@@ -824,7 +810,6 @@ test('closeAll() — is safe to call on a fresh reader with no open handles',
 test('open() — throws for a pack slot with no configured path',
     { skip: !FIXTURE_AVAILABLE },
     async () => {
-    // Use a slot that definitely has no pack file — slot 9 is out of range
     const reader = new DataPackReader(new Map([[1, path.join(FIXTURE_DATA, 'data.001')]]));
     await assert.rejects(() => reader.open(9),
         'open() must throw for a slot with no configured path');

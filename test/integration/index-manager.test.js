@@ -107,8 +107,10 @@ async function makeFixtureManager() {
  * Build a map of decodedName → Set<string> of all known real content hashes
  * from the fixture store files.
  *
- * pack-map.json contentHash holds stub hashes from loadIndex(), not real content.
- * The store files are the ground truth.
+ * We read physical store files rather than pack-map.json contentHash values
+ * because a fixture can legitimately contain multiple versions of the same
+ * filename (same name, different hash). The correct assertion is that the
+ * extracted hash is a member of the known-hash set for that name.
  */
 function buildStoreHashMap() {
     const fpPath = path.join(FIXTURE_STORE, 'fingerprints.jsonl');
@@ -172,10 +174,6 @@ test('loadIndex() — every entry name matches expected/entries.json',
 test('loadIndex() — second call uses blueprint cache (no re-parse)',
     { skip: !FIXTURE_AVAILABLE },
     async () => {
-    // The fixture already has a blueprint on disk. First loadIndex() should
-    // use the blueprint fast path; second call (new manager instance, same
-    // blueprint on disk) should also use the fast path and return in well
-    // under the time of a fresh parse.
     const { manager: m1 } = await makeFixtureManager();
     const t1 = Date.now();
     await m1.loadIndex();
@@ -186,9 +184,6 @@ test('loadIndex() — second call uses blueprint cache (no re-parse)',
     await m2.loadIndex();
     const elapsed2 = Date.now() - t2;
 
-    // Blueprint cache path should be at least as fast as the first load.
-    // We don't assert a strict time limit — just that it completed and returned results.
-    // A 5× slack avoids flaky CI failures on slow machines.
     assert.ok(elapsed2 < elapsed1 * 5 + 500,
         `cached load (${elapsed2}ms) should not be dramatically slower than first (${elapsed1}ms)`);
 });
@@ -224,7 +219,6 @@ test('getEntries() — type filter returns only matching entries',
     const { manager } = await makeFixtureManager();
     await manager.loadIndex();
 
-    // Find a type that exists in the fixture
     const typeCounts = {};
     for (const e of expected) typeCounts[e.assetType] = (typeCounts[e.assetType] || 0) + 1;
     const [targetType] = Object.entries(typeCounts).sort((a, b) => b[1] - a[1])[0];
@@ -242,7 +236,6 @@ test('getEntries() — search filter returns only entries containing the search 
     const { manager } = await makeFixtureManager();
     await manager.loadIndex();
 
-    // Pick a distinctive substring from the first entry name
     const sample  = expected[0].decodedName;
     const segment = sample.slice(0, Math.max(3, Math.floor(sample.length / 2)));
 
@@ -261,7 +254,6 @@ test('getEntries() — packId filter returns only entries from that slot',
     const { manager } = await makeFixtureManager();
     await manager.loadIndex();
 
-    // Find a pack slot that has entries in the fixture
     const slotCounts = {};
     for (const e of expected) slotCounts[e.packId] = (slotCounts[e.packId] || 0) + 1;
     const [targetSlot] = Object.entries(slotCounts).sort((a, b) => b[1] - a[1])[0];
@@ -280,7 +272,6 @@ test('getEntries() — pagination: page 1 and page 2 have different entries',
     const page1 = manager.getEntries({ pageSize: 5, page: 1 });
     const page2 = manager.getEntries({ pageSize: 5, page: 2 });
 
-    // Only meaningful if there are enough entries for two pages
     if (page2.entries.length === 0) return;
 
     assert.equal(page1.entries.length, 5, 'page 1 must have 5 entries');
@@ -306,7 +297,6 @@ test('getEntries() — throws if called before loadIndex()',
     { skip: !FIXTURE_AVAILABLE },
     async () => {
     const { manager } = await makeFixtureManager();
-    // Do NOT call loadIndex()
     assert.throws(
         () => manager.getEntries({}),
         { message: /not loaded/i }
@@ -337,11 +327,8 @@ test('extractAll() — extracted + skipped equals total entry count',
     const tmpDir = makeTempDir();
     try {
         const expected   = JSON.parse(fs.readFileSync(ENTRIES_PATH, 'utf8'));
-        // extractAll() skips zero-size entries (counted in skipped), so
-        // extracted + skipped must equal the full entry count, not just non-zero.
         const totalCount = expected.length;
 
-        // Build a fresh manager that writes to a temp AssetStore
         const tmpAssetStore = new AssetStore(tmpDir);
         await tmpAssetStore.rebuild();
         tmpAssetStore.ensureNullAsset();
@@ -406,7 +393,6 @@ test('extractAll() — extracted files exist in the temp AssetStore',
         await manager.loadIndex();
         await manager.extractAll();
 
-        // All non-null asset records in fpStore should have resolvable paths
         const assets = tmpFpStore.list('asset').filter(r =>
             r.hash !== AssetStore.NULL_ASSET_HASH && !r.isAlias
         );
@@ -435,8 +421,6 @@ test('extractAll() — type filter extracts only matching assets',
             .filter(([, c]) => c > 0)
             .sort((a, b) => b[1] - a[1])[0];
 
-        // extractAll() skips zero-size entries (counted in skipped), so
-        // extracted + skipped must equal the total count for the type, not just non-zero.
         const totalOfType = expected.filter(e => e.assetType === targetType).length;
 
         const tmpAssetStore = new AssetStore(tmpDir);
@@ -493,7 +477,8 @@ test('extractSingle() — returns buffer with correct SHA-256 for a known entry'
     assert.equal(buf.length, target.size,
         `extracted buffer size must match entry.size (${target.size})`);
 
-    // Verify against fixture store hash
+    // We use physical store files as the source of truth to handle the case
+    // where multiple valid hashes exist for the same filename.
     const knownHashes = STORE_HASH_MAP.get(target.decodedName);
     if (knownHashes && knownHashes.size > 0) {
         assert.ok(knownHashes.has(sha256(buf)),
@@ -550,8 +535,6 @@ test('rebuildBlueprints() — produces a blueprint that resolves all entry names
     async () => {
     const tmpDir = makeTempDir();
     try {
-        // Use a temp AssetStore/FpStore that has real content (from the fixture store)
-        // but a separate blueprint dir so we can test the rebuild.
         const tmpAssetStore = new AssetStore(tmpDir);
         await tmpAssetStore.rebuild();
         tmpAssetStore.ensureNullAsset();
@@ -573,14 +556,11 @@ test('rebuildBlueprints() — produces a blueprint that resolves all entry names
         });
 
         const manager = new IndexManager(config, tmpFpStore, tmpAssetStore);
-        // loadIndex() parses data.000, registers stubs, saves blueprint
         await manager.loadIndex();
-        // rebuildBlueprints() rebuilds from the registered stub records
         const blueprints = await manager.rebuildBlueprints();
 
         assert.ok(blueprints.length > 0, 'rebuildBlueprints() must return at least one blueprint');
 
-        // Load the saved blueprint and verify it covers all entries
         const indexFp  = await Blueprint.fingerprintFile(FIXTURE_INDEX);
         const saved    = await Blueprint.loadFromDisk(tmpDir, indexFp);
         assert.ok(saved !== null, 'blueprint must be saved to disk');
@@ -589,7 +569,6 @@ test('rebuildBlueprints() — produces a blueprint that resolves all entry names
         assert.equal(saved.getRecords().length, expected.length,
             'rebuilt blueprint must have the same record count as expected/entries.json');
 
-        // Every record must have a decodedName
         for (const rec of saved.getRecords()) {
             assert.ok(rec.decodedName && rec.decodedName.length > 0,
                 'every blueprint record must have a decodedName');
@@ -632,7 +611,6 @@ test('rebuildBlueprints() — blueprint resolves all entry names via getByName()
         const saved   = await Blueprint.loadFromDisk(tmpDir, indexFp);
         assert.ok(saved !== null);
 
-        // Every record's decodedName must be resolvable via getByName()
         let unresolvable = 0;
         for (const rec of saved.getRecords()) {
             if (!rec.decodedName) continue;
@@ -679,13 +657,10 @@ test('setConfig() — forces reload on next loadIndex() call',
     const { manager, config } = await makeFixtureManager();
     await manager.loadIndex();
 
-    // Calling getEntries() after loadIndex() works fine
     assert.doesNotThrow(() => manager.getEntries({}));
 
-    // Replacing config invalidates the cached index
     manager.setConfig(config);
 
-    // Now getEntries() should throw since index is cleared
     assert.throws(
         () => manager.getEntries({}),
         { message: /not loaded/i }
