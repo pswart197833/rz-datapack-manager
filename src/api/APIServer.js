@@ -4,18 +4,26 @@ const express           = require('express');
 const cors              = require('cors');
 const path              = require('path');
 const fs                = require('fs');
+const crypto            = require('crypto');
+const session           = require('express-session');
 const IndexManager      = require('./IndexManager');
 const SessionManager    = require('../session/SessionManager');
 const PackConfiguration = require('../config/PackConfiguration');
 const AssetStore        = require('../core/AssetStore');
 const FingerprintStore  = require('../fingerprint/FingerprintStore');
 const Blueprint         = require('../fingerprint/Blueprint');
+const UserStore         = require('../auth/UserStore');
+const AuthMiddleware    = require('../auth/AuthMiddleware');
 
 /**
  * APIServer
  * src/api/APIServer.js
  *
  * Express HTTP server exposing all DataPack Manager operations to the frontend.
+ *
+ * Authentication: express-session cookie. All /api/* routes require auth
+ * except /api/auth/login, /api/auth/logout, and /api/auth/me.
+ * The /health endpoint is never protected.
  *
  * Extraction jobs are tracked in-memory so the UI can poll for progress.
  * Config is persisted to {storeDir}/config.json across restarts.
@@ -34,6 +42,18 @@ class APIServer {
         this.sessionManager = null;
         this.config         = null;
 
+        // Auth — initialised in start()
+        this.userStore       = null;
+        this.authMiddleware  = null;
+
+        // Session secret — loaded from disk in start(). Null until then.
+        // Persisted to {storeDir}/session-secret so sessions survive restarts.
+        this.#sessionSecret    = null;
+        this.#sessionMiddleware = null;
+
+        // Underlying http.Server — stored so tests can call close()
+        this.#httpServer = null;
+
         // In-memory job tracker: jobId → { status, done, total, extracted, skipped, errors, currentFile, startedAt, finishedAt }
         this.#jobs = new Map();
 
@@ -42,18 +62,70 @@ class APIServer {
     }
 
     #jobs;
+    #sessionSecret;
+    #sessionMiddleware;
+    #httpServer;
 
     // ---------------------------------------------------------------------------
     // Startup
     // ---------------------------------------------------------------------------
 
     async start() {
+        // Load or create the persisted session secret.
+        // Persisting across restarts means active sessions survive a server restart.
+        if (!fs.existsSync(this.storeDir)) {
+            fs.mkdirSync(this.storeDir, { recursive: true });
+        }
+        const secretPath = path.join(this.storeDir, 'session-secret');
+        if (fs.existsSync(secretPath)) {
+            this.#sessionSecret = fs.readFileSync(secretPath, 'utf8').trim();
+        } else {
+            this.#sessionSecret = crypto.randomBytes(32).toString('hex');
+            fs.writeFileSync(secretPath, this.#sessionSecret, 'utf8');
+        }
+
+        // Instantiate the real session middleware now that we have the secret.
+        // The deferred wrapper registered in #setupMiddleware() will call this
+        // on every request. The server is not yet listening at this point so
+        // no request can arrive before this assignment completes.
+        this.#sessionMiddleware = session({
+            secret:            this.#sessionSecret,
+            resave:            false,
+            saveUninitialized: false,
+            cookie: {
+                httpOnly: true,
+                sameSite: 'lax'
+                // secure: set to true when TLS is enabled
+            }
+        });
+
+        // Initialise UserStore before loading config so auth is always ready
+        this.userStore      = new UserStore(this.storeDir);
+        await this.userStore.load();
+        this.authMiddleware = new AuthMiddleware(this.userStore);
+
         await this.#loadConfig();
         return new Promise((resolve) => {
-            this.app.listen(this.port, () => {
-                console.log(`DataPack Manager API running at http://localhost:${this.port}`);
+            this.#httpServer = this.app.listen(this.port, () => {
+                // Store the actual bound port — important when port:0 is used
+                // (OS assigns a free port). Tests read this via srv.boundPort.
+                this.boundPort = this.#httpServer.address().port;
+                console.log(`DataPack Manager API running at http://localhost:${this.boundPort}`);
                 resolve();
             });
+        });
+    }
+
+    /**
+     * Close the underlying HTTP server.
+     * Releases the port and allows the process to exit cleanly.
+     * Used by tests — each test must call cleanup() which calls this.
+     * @returns {Promise<void>}
+     */
+    close() {
+        return new Promise((resolve) => {
+            if (!this.#httpServer) return resolve();
+            this.#httpServer.close(() => resolve());
         });
     }
 
@@ -62,8 +134,24 @@ class APIServer {
     // ---------------------------------------------------------------------------
 
     #setupMiddleware() {
-        this.app.use(cors());
+        this.app.use(cors({
+            origin: true,
+            credentials: true
+        }));
         this.app.use(express.json());
+
+        // Session middleware is inserted here as a deferred wrapper.
+        // #sessionMiddleware is set to the real express-session instance in
+        // start() once the secret has been loaded from disk. Until then,
+        // requests that arrive before start() completes call next() directly
+        // (the server is not listening yet at that point anyway).
+        this.app.use((req, res, next) => {
+            if (this.#sessionMiddleware) {
+                this.#sessionMiddleware(req, res, next);
+            } else {
+                next();
+            }
+        });
 
         const uiDir = path.join(__dirname, '..', 'ui');
         if (fs.existsSync(uiDir)) {
@@ -83,7 +171,27 @@ class APIServer {
     // ---------------------------------------------------------------------------
 
     #setupRoutes() {
+        // ---- Health (no auth) ----
+        this.app.get('/health', (_req, res) => res.json({ ok: true, version: '1.0.0' }));
+
+        // ---- Auth routes (no requireAuth — these ARE the login flow) ----
+        const authRouter = express.Router();
+        authRouter.post('/login',  this.#wrap(this.#login.bind(this)));
+        authRouter.post('/logout', this.#wrap(this.#logout.bind(this)));
+        authRouter.get('/me',      this.#wrap(this.#me.bind(this)));
+        this.app.use('/api/auth', authRouter);
+
+        // ---- Protected API router ----
         const r = express.Router();
+
+        // Apply requireAuth to all routes in this router
+        r.use((req, res, next) => {
+            // authMiddleware may not be initialised yet if routes are hit before start()
+            if (!this.authMiddleware) {
+                return res.status(503).json({ error: 'Server not initialised' });
+            }
+            this.authMiddleware.requireAuth()(req, res, next);
+        });
 
         r.get('/config',   this.#wrap(this.#getConfig.bind(this)));
         r.post('/config',  this.#wrap(this.#setConfig.bind(this)));
@@ -112,8 +220,7 @@ class APIServer {
 
         this.app.use('/api', r);
 
-        this.app.get('/health', (_req, res) => res.json({ ok: true, version: '1.0.0' }));
-
+        // SPA catch-all (must be last)
         this.app.get('*', (_req, res) => {
             const indexPath = path.join(__dirname, '..', 'ui', 'index.html');
             if (fs.existsSync(indexPath)) {
@@ -121,6 +228,64 @@ class APIServer {
             } else {
                 res.status(404).json({ error: 'Frontend not found' });
             }
+        });
+    }
+
+    // ---------------------------------------------------------------------------
+    // Auth handlers
+    // ---------------------------------------------------------------------------
+
+    async #login(req, res) {
+        const { username, password } = req.body;
+
+        if (!username || !password) {
+            return res.status(400).json({ error: 'username and password are required' });
+        }
+
+        const ip = req.ip || req.connection.remoteAddress || '127.0.0.1';
+
+        // Rate limit check
+        if (!this.authMiddleware.checkRateLimit(ip)) {
+            return res.status(429).json({ error: 'Too many attempts' });
+        }
+
+        const user = await this.userStore.verify(username, password);
+
+        if (!user) {
+            this.authMiddleware.recordFailedAttempt(ip);
+            return res.status(401).json({ error: 'Invalid username or password' });
+        }
+
+        // Successful login — reset rate limit and set session
+        this.authMiddleware.resetRateLimit(ip);
+        req.session.userId = user.userId;
+
+        res.json({
+            userId:  user.userId,
+            username: user.username,
+            isAdmin: user.isAdmin
+        });
+    }
+
+    async #logout(req, res) {
+        req.session.destroy(() => {});
+        res.json({ ok: true });
+    }
+
+    async #me(req, res) {
+        if (!req.session || !req.session.userId) {
+            return res.status(401).json({ error: 'Unauthorised' });
+        }
+
+        const user = this.userStore.findById(req.session.userId);
+        if (!user) {
+            return res.status(401).json({ error: 'Unauthorised' });
+        }
+
+        res.json({
+            userId:  user.userId,
+            username: user.username,
+            isAdmin: user.isAdmin
         });
     }
 
@@ -201,7 +366,6 @@ class APIServer {
     async #extract(req, res) {
         if (!this.indexManager) return res.status(503).json({ error: 'Index not loaded' });
 
-        // Only one extraction at a time
         const running = Array.from(this.#jobs.values()).find(j => j.status === 'running');
         if (running) {
             return res.status(409).json({ error: 'Extraction already in progress', jobId: running.jobId });
@@ -226,7 +390,6 @@ class APIServer {
         this.#jobs.set(jobId, job);
         res.json({ jobId, status: 'started' });
 
-        // Run in background — UI polls /extract/status
         setImmediate(async () => {
             try {
                 await this.#ensureIndexLoaded();
@@ -241,26 +404,20 @@ class APIServer {
                 job.status     = 'complete';
                 job.extracted  = result.extracted;
                 job.skipped    = result.skipped;
-                job.errors     = result.errors.slice(0, 20); // cap at 20
+                job.errors     = result.errors.slice(0, 20);
                 job.done       = job.total;
                 job.finishedAt = new Date().toISOString();
-                console.log(`Extract complete: ${result.extracted} extracted, ${result.skipped} skipped, ${result.errors.length} errors`);
             } catch (err) {
                 job.status     = 'error';
                 job.errors     = [err.message];
                 job.finishedAt = new Date().toISOString();
-                console.error('Extract failed:', err.message);
             }
         });
     }
 
     async #extractStatus(_req, res) {
-        // Return the most recent job, or idle if none
         const jobs = Array.from(this.#jobs.values());
-        if (jobs.length === 0) {
-            return res.json({ status: 'idle' });
-        }
-        // Most recent job
+        if (jobs.length === 0) return res.json({ status: 'idle' });
         const job = jobs[jobs.length - 1];
         const pct = job.total > 0 ? Math.round((job.done / job.total) * 100) : 0;
         res.json({ ...job, percent: pct });
@@ -295,7 +452,7 @@ class APIServer {
     async #createSession(req, res) {
         if (!this.sessionManager) return res.status(503).json({ error: 'Not initialised' });
         const { label } = req.body;
-        const session = await this.sessionManager.create(label || 'New Session', this.config);
+        const session = await this.sessionManager.create(this.config, label || 'New Session');
         res.status(201).json(session.toJSON());
     }
 
@@ -306,40 +463,40 @@ class APIServer {
 
     async #getSession(req, res) {
         if (!this.sessionManager) return res.status(503).json({ error: 'Not initialised' });
-        const session = this.sessionManager.getSession(req.params.id)
+        const s = this.sessionManager.getSession(req.params.id)
             || await this.sessionManager.resume(req.params.id).catch(() => null);
-        if (!session) return res.status(404).json({ error: 'Session not found' });
-        res.json(session.toJSON());
+        if (!s) return res.status(404).json({ error: 'Session not found' });
+        res.json(s.toJSON());
     }
 
     async #listSessionFiles(req, res) {
         if (!this.sessionManager) return res.status(503).json({ error: 'Not initialised' });
-        const session = this.sessionManager.getSession(req.params.id)
+        const s = this.sessionManager.getSession(req.params.id)
             || await this.sessionManager.resume(req.params.id).catch(() => null);
-        if (!session) return res.status(404).json({ error: 'Session not found' });
-        let files = session.listFiles();
+        if (!s) return res.status(404).json({ error: 'Session not found' });
+        let files = s.listFiles();
         if (req.query.category) files = files.filter(f => f.category === req.query.category);
         res.json(files.map(f => f.toJSON()));
     }
 
     async #addSessionFile(req, res) {
         if (!this.sessionManager) return res.status(503).json({ error: 'Not initialised' });
-        const session = this.sessionManager.getSession(req.params.id);
-        if (!session) return res.status(404).json({ error: 'Session not found' });
+        const s = this.sessionManager.getSession(req.params.id);
+        if (!s) return res.status(404).json({ error: 'Session not found' });
         const { sourcePath, targetName } = req.body;
         if (!sourcePath || !targetName) {
             return res.status(400).json({ error: 'sourcePath and targetName are required' });
         }
-        const staged = session.addFile(sourcePath, targetName);
+        const staged = s.addFile(sourcePath, targetName);
         await this.sessionManager.checkpoint(req.params.id);
         res.status(201).json(staged.toJSON());
     }
 
     async #removeSessionFile(req, res) {
         if (!this.sessionManager) return res.status(503).json({ error: 'Not initialised' });
-        const session = this.sessionManager.getSession(req.params.id);
-        if (!session) return res.status(404).json({ error: 'Session not found' });
-        const removed = session.removeFile(decodeURIComponent(req.params.name));
+        const s = this.sessionManager.getSession(req.params.id);
+        if (!s) return res.status(404).json({ error: 'Session not found' });
+        const removed = s.removeFile(decodeURIComponent(req.params.name));
         if (removed) await this.sessionManager.checkpoint(req.params.id);
         res.json({ removed });
     }
@@ -372,10 +529,10 @@ class APIServer {
         if (!this.sessionManager) return res.status(503).json({ error: 'Not initialised' });
         const { indexFingerprint, label } = req.body;
         if (!indexFingerprint) return res.status(400).json({ error: 'indexFingerprint is required' });
-        const session = await this.sessionManager.openFromBlueprint(
+        const s = await this.sessionManager.openFromBlueprint(
             indexFingerprint, this.storeDir, this.config, label || ''
         );
-        res.status(201).json(session.toJSON());
+        res.status(201).json(s.toJSON());
     }
 
     // ---------------------------------------------------------------------------

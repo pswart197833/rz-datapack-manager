@@ -19,19 +19,21 @@
     "diagnose:packid": "node test/diagnose-packid.js",
     "diagnose:packlist": "node test/diagnose-packlist.js",
     "diagnose:offsets": "node test/diagnose-offsets.js",
-    "test:check-pack" : "node test/check-pack.js",
+    "test:check-pack": "node test/check-pack.js",
     "diagnose:pipeline": "node test/diagnose-pipeline.js",
     "diagnose:packid2": "node test/diagnose-packid-trace.js",
     "diagnose:reference-codec": "node test/diagnose-reference-codec.js",
-    "diagnose:correct-codec" : "node test/diagnose-correct-codec.js",
-    "diagnose:empty-buffer" : "node test/diagnose-empty-buffer.js",
+    "diagnose:correct-codec": "node test/diagnose-correct-codec.js",
+    "diagnose:empty-buffer": "node test/diagnose-empty-buffer.js",
     "fixtures:collect-test-data": "node test/fixtures/1.collect-test-data.js",
     "fixtures:setup-test-store": "node test/fixtures/2.setup-test-store.js",
     "fixtures:generate": "node test/fixtures/3.generate-fixture.js"
   },
   "dependencies": {
+    "bcrypt": "^6.0.0",
     "cors": "^2.8.6",
     "express": "^4.22.1",
+    "express-session": "^1.19.0",
     "uuid": "^9.0.1"
   },
   "engines": {

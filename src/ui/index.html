@@ -21,6 +21,23 @@
         *{box-sizing:border-box}
         body{background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14px;min-height:100vh;margin:0}
 
+        /* Login overlay */
+        #login-overlay{position:fixed;inset:0;background:var(--bg);z-index:9999;display:none;align-items:center;justify-content:center}
+        .login-card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:36px 40px;width:100%;max-width:360px}
+        .login-card .login-logo-mark{font-family:var(--mono);font-size:11px;font-weight:700;letter-spacing:.12em;color:var(--accent);text-transform:uppercase;margin-bottom:4px}
+        .login-card .login-logo-title{font-size:20px;font-weight:600;color:var(--text);margin-bottom:28px}
+        .login-error{font-family:var(--mono);font-size:12px;color:var(--danger);margin-top:10px;min-height:18px}
+        .login-btn-wrap{margin-top:20px}
+        .login-btn-wrap .btn-accent{width:100%;padding:10px;font-size:13px;text-align:center}
+        .btn-spinner{display:inline-block;width:14px;height:14px;border:2px solid rgba(0,0,0,.3);border-top-color:#000;border-radius:50%;animation:spin .6s linear infinite;margin-right:6px;vertical-align:middle}
+        @keyframes spin{to{transform:rotate(360deg)}}
+
+        /* Server unreachable overlay */
+        #server-error-overlay{position:fixed;inset:0;background:var(--bg);z-index:9999;display:none;align-items:center;justify-content:center}
+        .server-error-card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:40px;text-align:center;max-width:400px}
+        .server-error-card i{font-size:40px;color:var(--danger);display:block;margin-bottom:16px}
+        .server-error-card p{color:var(--text-dim);margin-bottom:20px}
+
         /* Sidebar */
         #sidebar{width:220px;min-height:100vh;background:var(--bg-panel);border-right:1px solid var(--border);position:fixed;top:0;left:0;display:flex;flex-direction:column;z-index:100}
         .sidebar-logo{padding:20px 18px 16px;border-bottom:1px solid var(--border)}
@@ -32,7 +49,14 @@
         .nav-item:hover{color:var(--text);background:rgba(255,255,255,.03)}
         .nav-item.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-glow)}
         .nav-item i{width:16px;font-size:14px}
-        .sidebar-status{margin-top:auto;padding:14px 18px;border-top:1px solid var(--border);font-family:var(--mono);font-size:11px;color:var(--text-muted)}
+
+        /* Sidebar footer — user row + status */
+        .sidebar-footer{margin-top:auto}
+        .sidebar-user{padding:12px 18px;border-top:1px solid var(--border);display:none;align-items:center;justify-content:space-between;font-family:var(--mono);font-size:11px}
+        .sidebar-username{color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px}
+        .sidebar-signout{color:var(--text-muted);cursor:pointer;background:none;border:none;font-family:var(--mono);font-size:11px;padding:0;text-decoration:underline}
+        .sidebar-signout:hover{color:var(--danger)}
+        .sidebar-status{padding:10px 18px 14px;font-family:var(--mono);font-size:11px;color:var(--text-muted)}
         .status-dot{width:7px;height:7px;border-radius:50%;display:inline-block;margin-right:6px}
         .status-dot.ok{background:var(--accent);box-shadow:0 0 6px var(--accent)}
         .status-dot.error{background:var(--danger)}
@@ -153,6 +177,39 @@
 </head>
 <body>
 
+<!-- ================================================================ Login overlay ================================================================ -->
+<div id="login-overlay">
+    <div class="login-card">
+        <div class="login-logo-mark">DataPack</div>
+        <div class="login-logo-title">Pack Manager</div>
+        <div class="form-field">
+            <label class="form-label" for="login-username">Username</label>
+            <input type="text" class="form-control-dark" id="login-username"
+                autocomplete="username">
+        </div>
+        <div class="form-field">
+            <label class="form-label" for="login-password">Password</label>
+            <input type="password" class="form-control-dark" id="login-password"
+                autocomplete="current-password">
+        </div>
+        <div class="login-error" id="login-error"></div>
+        <div class="login-btn-wrap">
+            <button class="btn-accent" id="login-btn" onclick="submitLogin()">Sign In</button>
+        </div>
+    </div>
+</div>
+
+<!-- ================================================================ Server unreachable overlay ================================================================ -->
+<div id="server-error-overlay">
+    <div class="server-error-card">
+        <i class="bi bi-wifi-off"></i>
+        <h5 style="color:var(--text);margin-bottom:8px">Server Unreachable</h5>
+        <p>Could not connect to the DataPack Manager server.</p>
+        <button class="btn-accent" onclick="location.reload()">Retry</button>
+    </div>
+</div>
+
+<!-- ================================================================ Sidebar ================================================================ -->
 <div id="sidebar">
     <div class="sidebar-logo">
         <div class="logo-mark">DataPack</div>
@@ -179,9 +236,15 @@
             <i class="bi bi-sliders"></i> Configuration
         </div>
     </div>
-    <div class="sidebar-status" id="sidebar-status">
-        <span class="status-dot idle" id="status-dot"></span>
-        <span id="status-text">Not configured</span>
+    <div class="sidebar-footer">
+        <div class="sidebar-user" id="sidebar-user">
+            <span class="sidebar-username" id="sidebar-username">—</span>
+            <button class="sidebar-signout" onclick="signOut()">Sign out</button>
+        </div>
+        <div class="sidebar-status" id="sidebar-status">
+            <span class="status-dot idle" id="status-dot"></span>
+            <span id="status-text">Not configured</span>
+        </div>
     </div>
 </div>
 
@@ -194,7 +257,7 @@
         </button>
     </div>
 
-    <!-- ================================================================ Assets -->
+    <!-- ================================================================ Assets ================================================================ -->
     <div class="page active" id="page-assets">
         <div class="stat-grid" id="stat-grid"></div>
         <div class="filter-bar">
@@ -255,13 +318,13 @@
         </div>
     </div>
 
-    <!-- ================================================================ Archiver -->
+    <!-- ================================================================ Archiver ================================================================ -->
     <div class="page" id="page-archiver">
         <div class="card-panel">
             <h6>Extract All Assets to Store</h6>
             <p style="color:var(--text-dim);font-size:13px;margin-bottom:16px">
                 Extract all assets from the loaded pack files into the content-addressed store.
-                Already-stored assets are skipped automatically — safe to run across multiple versions to build up your archive.
+                Already-stored assets are skipped automatically.
             </p>
             <div class="filter-bar" style="margin-bottom:16px">
                 <div>
@@ -279,8 +342,6 @@
                 </button>
             </div>
         </div>
-
-        <!-- Progress -->
         <div class="progress-wrap" id="extract-progress" style="display:none">
             <div style="display:flex;justify-content:space-between;align-items:center">
                 <span style="font-family:var(--mono);font-size:12px;color:var(--text)">
@@ -296,17 +357,14 @@
                 <span id="extract-file" style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right"></span>
             </div>
         </div>
-
-        <!-- Result -->
         <div class="card-panel" id="extract-result" style="display:none">
             <h6>Last Extraction Result</h6>
             <div id="extract-result-body"></div>
         </div>
     </div>
 
-    <!-- ================================================================ Modder -->
+    <!-- ================================================================ Modder ================================================================ -->
     <div class="page" id="page-modder">
-        <!-- Step 1: Choose session -->
         <div id="modder-step-choose">
             <div class="section-actions">
                 <button class="btn-accent" onclick="showModderCreate()">
@@ -319,8 +377,6 @@
                     <i class="bi bi-arrow-clockwise"></i> Refresh
                 </button>
             </div>
-
-            <!-- New session form -->
             <div class="card-panel" id="modder-create-form" style="display:none">
                 <h6>New Empty Session</h6>
                 <div class="form-field">
@@ -332,13 +388,8 @@
                     <button class="btn-ghost" onclick="document.getElementById('modder-create-form').style.display='none'">Cancel</button>
                 </div>
             </div>
-
-            <!-- From blueprint form -->
             <div class="card-panel" id="modder-blueprint-form" style="display:none">
                 <h6>Open From Blueprint</h6>
-                <p style="color:var(--text-dim);font-size:12px;margin-bottom:12px">
-                    Opens an existing pack for modification. All assets are pre-loaded as in-store entries.
-                </p>
                 <div class="form-field">
                     <label class="form-label">Available Blueprints</label>
                     <select class="form-control-dark" id="blueprint-select">
@@ -354,12 +405,8 @@
                     <button class="btn-ghost" onclick="document.getElementById('modder-blueprint-form').style.display='none'">Cancel</button>
                 </div>
             </div>
-
-            <!-- Sessions list -->
             <div id="modder-sessions-list"></div>
         </div>
-
-        <!-- Step 2: Active session detail -->
         <div id="modder-step-detail" style="display:none">
             <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
                 <button class="btn-ghost" onclick="closeSessionDetail()">
@@ -371,8 +418,6 @@
                 </div>
                 <span class="session-status-badge" id="detail-status-badge" style="margin-left:auto"></span>
             </div>
-
-            <!-- Add file form -->
             <div class="card-panel" id="detail-add-form" style="display:none">
                 <h6>Add / Replace File</h6>
                 <div class="config-grid">
@@ -390,8 +435,6 @@
                     <button class="btn-ghost" onclick="document.getElementById('detail-add-form').style.display='none'">Cancel</button>
                 </div>
             </div>
-
-            <!-- Session actions -->
             <div class="card-panel">
                 <h6>Actions</h6>
                 <div style="display:flex;gap:8px;flex-wrap:wrap">
@@ -412,8 +455,6 @@
                     </button>
                 </div>
             </div>
-
-            <!-- Staged files -->
             <div class="card-panel">
                 <h6>Staged Files (<span id="detail-file-count">0</span>)</h6>
                 <div class="filter-bar" style="margin-bottom:10px">
@@ -431,7 +472,7 @@
         </div>
     </div>
 
-    <!-- ================================================================ Config -->
+    <!-- ================================================================ Config ================================================================ -->
     <div class="page" id="page-config">
         <div class="card-panel">
             <h6>Pack File Paths</h6>
@@ -469,6 +510,11 @@
 
 <script>
 // ============================================================
+// Auth state
+// ============================================================
+let currentUser = null; // { userId, username, isAdmin }
+
+// ============================================================
 // AssetTableView
 // ============================================================
 class AssetTableView {
@@ -496,7 +542,6 @@ class AssetTableView {
 // ============================================================
 // State
 // ============================================================
-const API='';  // same origin
 const view=new AssetTableView();
 let currentPage=1,totalPages=1,searchTimer=null;
 let extractPollTimer=null;
@@ -507,9 +552,13 @@ let activeSessionFiles=[];
 // Helpers
 // ============================================================
 async function api(method,p,body){
-    const opts={method,headers:{'Content-Type':'application/json'}};
+    const opts={method,headers:{'Content-Type':'application/json'},credentials:'same-origin'};
     if(body)opts.body=JSON.stringify(body);
     const res=await fetch('/api'+p,opts);
+    if(res.status===401){
+        showLogin();
+        throw new Error('Session expired. Please log in again.');
+    }
     if(!res.ok){const e=await res.json().catch(()=>({error:res.statusText}));throw new Error(e.error||res.statusText)}
     return res.json()
 }
@@ -526,6 +575,109 @@ function setStatus(state,text){
 }
 function fmt(n){return n.toLocaleString()}
 function fmtBytes(b){if(b<1024)return b+' B';if(b<1048576)return(b/1024).toFixed(1)+' KB';return(b/1048576).toFixed(1)+' MB'}
+
+// ============================================================
+// Auth — Login page
+// ============================================================
+function showLogin(){
+    document.getElementById('login-overlay').style.display='flex';
+    document.getElementById('login-error').textContent='';
+    setTimeout(()=>document.getElementById('login-username')?.focus(),50);
+}
+function hideLogin(){
+    document.getElementById('login-overlay').style.display='none';
+}
+
+async function submitLogin(){
+    const username=document.getElementById('login-username').value.trim();
+    const password=document.getElementById('login-password').value;
+    const errorEl=document.getElementById('login-error');
+    const btn=document.getElementById('login-btn');
+    errorEl.textContent='';
+    if(!username||!password){errorEl.textContent='Username and password are required.';return;}
+    btn.disabled=true;
+    btn.innerHTML='<span class="btn-spinner"></span> Signing in…';
+    try{
+        const res=await fetch('/api/auth/login',{
+            method:'POST',headers:{'Content-Type':'application/json'},
+            credentials:'same-origin',
+            body:JSON.stringify({username,password})
+        });
+        if(res.status===400){errorEl.textContent='Username and password are required.';return;}
+        if(res.status===401){errorEl.textContent='Invalid username or password.';return;}
+        if(res.status===429){errorEl.textContent='Too many attempts. Try again shortly.';return;}
+        if(!res.ok){errorEl.textContent='Could not reach the server.';return;}
+        currentUser=await res.json();
+        applyUserToSidebar(currentUser);
+        hideLogin();
+        document.getElementById('login-password').value='';
+        await bootstrap();
+    }catch{
+        errorEl.textContent='Could not reach the server.';
+    }finally{
+        btn.disabled=false;
+        btn.innerHTML='Sign In';
+    }
+}
+
+async function signOut(){
+    try{await fetch('/api/auth/logout',{method:'POST',credentials:'same-origin'});}catch{}
+    currentUser=null;
+    document.getElementById('sidebar-user').style.display='none';
+    showLogin();
+}
+
+function applyUserToSidebar(user){
+    const row=document.getElementById('sidebar-user');
+    if(row)row.style.display='flex';
+    const el=document.getElementById('sidebar-username');
+    if(el)el.textContent=user.username;
+}
+
+// Enter key on login form
+document.addEventListener('DOMContentLoaded',()=>{
+    ['login-username','login-password'].forEach(id=>{
+        document.getElementById(id)?.addEventListener('keydown',e=>{if(e.key==='Enter')submitLogin();});
+    });
+});
+
+// ============================================================
+// Bootstrap sequence
+// ============================================================
+async function bootstrap(){
+    // Step 1 — liveness
+    try{
+        const r=await fetch('/health');
+        if(!r.ok)throw new Error();
+    }catch{
+        document.getElementById('server-error-overlay').style.display='flex';
+        return;
+    }
+
+    // Step 2 — auth check
+    if(!currentUser){
+        try{
+            const meRes=await fetch('/api/auth/me',{credentials:'same-origin'});
+            if(meRes.status===401){showLogin();return;}
+            currentUser=await meRes.json();
+            applyUserToSidebar(currentUser);
+        }catch{
+            showLogin();return;
+        }
+    }
+
+    // Step 3 — config check
+    try{
+        await api('GET','/config');
+        setStatus('ok','Ready');
+        loadEntries(1);
+    }catch(err){
+        if(!err.message.includes('Session expired')){
+            setStatus('idle','Not configured');
+            showPage('config');
+        }
+    }
+}
 
 // ============================================================
 // Navigation
@@ -571,6 +723,7 @@ async function loadEntries(page=1){
         setStatus('ok',fmt(result.total)+' assets');
         document.getElementById('topbar-meta').textContent=fmt(result.total)+' entries';
     }catch(err){
+        if(err.message.includes('Session expired'))return;
         tbody.innerHTML='<tr><td colspan="5"><div class="empty-state"><i class="bi bi-exclamation-circle"></i><p>'+err.message+'</p></div></td></tr>';
         setStatus('error','Load failed')
     }
@@ -627,13 +780,13 @@ async function startExtraction(){
     const typesRaw=document.getElementById('extract-types').value.trim();
     const types=typesRaw?typesRaw.split(',').map(t=>t.trim()).filter(Boolean):undefined;
     try{
-        const job=await api('POST','/extract',{types});
+        await api('POST','/extract',{types});
         document.getElementById('extract-progress').style.display='';
         document.getElementById('extract-result').style.display='none';
         document.getElementById('btn-extract').disabled=true;
         setStatus('busy','Extracting...');
         startExtractionPoll()
-    }catch(err){toast(err.message,'error')}
+    }catch(err){if(!err.message.includes('Session expired'))toast(err.message,'error')}
 }
 
 function startExtractionPoll(){
@@ -650,7 +803,6 @@ async function checkExtractionStatus(){
             document.getElementById('btn-extract').disabled=false;
             return
         }
-        // Show progress
         document.getElementById('extract-progress').style.display='';
         const pct=job.percent||0;
         document.getElementById('extract-bar').style.width=pct+'%';
@@ -660,7 +812,6 @@ async function checkExtractionStatus(){
             '  (+'+fmt(job.extracted||0)+' new, ~'+fmt(job.skipped||0)+' skip)';
         const f=job.currentFile||'';
         document.getElementById('extract-file').textContent=f.length>40?'...'+f.slice(-37):f;
-
         if(job.status==='running'){
             document.getElementById('extract-status-label').textContent='Extracting...';
             setStatus('busy','Extracting '+pct+'%')
@@ -671,8 +822,10 @@ async function checkExtractionStatus(){
             showExtractionResult(job)
         }
     }catch(err){
-        clearInterval(extractPollTimer);
-        document.getElementById('btn-extract').disabled=false
+        if(!err.message.includes('Session expired')){
+            clearInterval(extractPollTimer);
+            document.getElementById('btn-extract').disabled=false
+        }
     }
 }
 
@@ -718,7 +871,7 @@ async function loadBlueprints(){
                 `<option value="${b.indexFingerprint}">${b.indexFingerprint.slice(0,16)}...  (${new Date(b.savedAt).toLocaleDateString()})</option>`
             ).join('')
         }
-    }catch(e){console.warn('Could not load blueprints:',e.message)}
+    }catch(e){if(!e.message.includes('Session expired'))console.warn('Could not load blueprints:',e.message)}
 }
 
 async function loadModderSessions(){
@@ -749,7 +902,8 @@ async function loadModderSessions(){
             </div>
         </div>`).join('')
     }catch(err){
-        list.innerHTML='<div class="empty-state"><i class="bi bi-exclamation-circle"></i><p>'+err.message+'</p></div>'
+        if(!err.message.includes('Session expired'))
+            list.innerHTML='<div class="empty-state"><i class="bi bi-exclamation-circle"></i><p>'+err.message+'</p></div>'
     }
 }
 
@@ -772,7 +926,7 @@ async function createModderSession(){
         document.getElementById('modder-create-form').style.display='none';
         document.getElementById('new-session-label').value='';
         toast('Session created');loadModderSessions()
-    }catch(err){toast(err.message,'error')}
+    }catch(err){if(!err.message.includes('Session expired'))toast(err.message,'error')}
 }
 
 async function createBlueprintSession(){
@@ -785,7 +939,7 @@ async function createBlueprintSession(){
         document.getElementById('modder-blueprint-form').style.display='none';
         document.getElementById('bp-session-label').value='';
         toast('Session opened from blueprint');loadModderSessions()
-    }catch(err){toast(err.message,'error')}
+    }catch(err){if(!err.message.includes('Session expired'))toast(err.message,'error')}
 }
 
 async function loadSessionDetail(id){
@@ -800,15 +954,13 @@ async function loadSessionDetail(id){
         const badge=document.getElementById('detail-status-badge');
         badge.className='session-status-badge status-'+session.status;
         badge.textContent=session.status;
-        // Show/hide action buttons based on status
         document.getElementById('btn-prepare').style.display=
             ['active','interrupted'].includes(session.status)?'':'none';
         document.getElementById('btn-commit').style.display=
             session.status==='ready'?'':'none';
-        // Load files
         activeSessionFiles=session.stagedFiles||[];
         renderStagedFiles()
-    }catch(err){toast(err.message,'error')}
+    }catch(err){if(!err.message.includes('Session expired'))toast(err.message,'error')}
 }
 
 function closeSessionDetail(){
@@ -848,14 +1000,13 @@ async function addFileToSession(){
     const targetName=document.getElementById('add-target-name').value.trim();
     if(!sourcePath||!targetName){toast('Both paths are required','warn');return}
     try{
-        const staged=await api('POST','/sessions/'+activeSessionId+'/files',{sourcePath,targetName});
+        await api('POST','/sessions/'+activeSessionId+'/files',{sourcePath,targetName});
         toast('File added: '+targetName);
         document.getElementById('add-source-path').value='';
         document.getElementById('add-target-name').value='';
         document.getElementById('detail-add-form').style.display='none';
-        // Refresh session
         await loadSessionDetail(activeSessionId)
-    }catch(err){toast(err.message,'error')}
+    }catch(err){if(!err.message.includes('Session expired'))toast(err.message,'error')}
 }
 
 async function removeFileFromSession(name){
@@ -863,7 +1014,7 @@ async function removeFileFromSession(name){
         await api('DELETE','/sessions/'+activeSessionId+'/files/'+encodeURIComponent(name));
         toast(name+' marked as deleted');
         await loadSessionDetail(activeSessionId)
-    }catch(err){toast(err.message,'error')}
+    }catch(err){if(!err.message.includes('Session expired'))toast(err.message,'error')}
 }
 
 async function prepareActiveSession(){
@@ -871,7 +1022,7 @@ async function prepareActiveSession(){
         await api('POST','/sessions/'+activeSessionId+'/prepare');
         toast('Session prepared — ready to commit');
         await loadSessionDetail(activeSessionId)
-    }catch(err){toast(err.message,'error')}
+    }catch(err){if(!err.message.includes('Session expired'))toast(err.message,'error')}
 }
 
 async function commitActiveSession(){
@@ -881,7 +1032,7 @@ async function commitActiveSession(){
         const result=await api('POST','/sessions/'+activeSessionId+'/commit');
         toast('Committed — '+fmt(result.complete)+' assets written');
         await loadSessionDetail(activeSessionId)
-    }catch(err){toast(err.message,'error')}
+    }catch(err){if(!err.message.includes('Session expired'))toast(err.message,'error')}
 }
 
 async function discardActiveSession(){
@@ -894,7 +1045,7 @@ async function discardSessionById(id){
     try{
         await api('POST','/sessions/'+id+'/discard');
         toast('Session discarded');loadModderSessions()
-    }catch(err){toast(err.message,'error')}
+    }catch(err){if(!err.message.includes('Session expired'))toast(err.message,'error')}
 }
 
 // ============================================================
@@ -910,7 +1061,9 @@ async function loadConfig(){
         renderPackPathInputs(config.packPaths||[]);
         document.getElementById('config-status-card').style.display='';
         document.getElementById('config-display').textContent=JSON.stringify(config,null,2)
-    }catch{renderPackPathInputs([])}
+    }catch(err){
+        if(!err.message.includes('Session expired'))renderPackPathInputs([])
+    }
 }
 
 function renderPackPathInputs(packPaths){
@@ -943,23 +1096,16 @@ async function saveConfig(){
         setStatus('ok',config.label||'Configured');
         document.getElementById('config-status-card').style.display='';
         document.getElementById('config-display').textContent=JSON.stringify(config,null,2)
-    }catch(err){toast(err.message,'error')}
+    }catch(err){if(!err.message.includes('Session expired'))toast(err.message,'error')}
 }
 
 // ============================================================
-// Init
+// Init — bootstrap sequence
 // ============================================================
 (async()=>{
     renderPackPathInputs([]);
-    try{
-        await api('GET','/config');
-        setStatus('ok','Ready');
-        loadEntries(1)
-    }catch{
-        setStatus('idle','Not configured');
-        showPage('config')
-    }
-})()
+    await bootstrap();
+})();
 </script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 </body>
