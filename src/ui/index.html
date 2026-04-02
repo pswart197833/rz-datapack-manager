@@ -50,7 +50,7 @@
         .nav-item.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-glow)}
         .nav-item i{width:16px;font-size:14px}
 
-        /* Sidebar footer — user row + status */
+        /* Sidebar footer */
         .sidebar-footer{margin-top:auto}
         .sidebar-user{padding:12px 18px;border-top:1px solid var(--border);display:none;align-items:center;justify-content:space-between;font-family:var(--mono);font-size:11px}
         .sidebar-username{color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px}
@@ -123,6 +123,7 @@
         .btn-ghost:hover{border-color:var(--accent);color:var(--accent)}
         .btn-danger{background:transparent;color:var(--danger);border:1px solid rgba(244,63,94,.3);border-radius:6px;padding:7px 14px;font-family:var(--mono);font-size:12px;cursor:pointer;transition:all .15s;white-space:nowrap}
         .btn-danger:hover{background:rgba(244,63,94,.1)}
+        .btn-danger:disabled{opacity:.35;cursor:default}
 
         /* Form */
         .form-field{margin-bottom:14px}
@@ -154,6 +155,15 @@
         .cat-new{background:#1e2e2a;color:var(--accent)}
         .cat-in-store{background:#1e2840;color:var(--info)}
         .cat-deleted{background:#2e1e1e;color:var(--text-muted);text-decoration:line-through}
+
+        /* User management table */
+        table.user-table{width:100%;border-collapse:collapse;font-size:13px}
+        table.user-table thead th{background:var(--bg-panel);color:var(--text-muted);font-family:var(--mono);font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;padding:10px 14px;border-bottom:1px solid var(--border)}
+        table.user-table tbody tr{border-bottom:1px solid var(--border)}
+        table.user-table tbody tr:last-child{border-bottom:none}
+        table.user-table td{padding:9px 14px;color:var(--text-dim);vertical-align:middle;font-family:var(--mono);font-size:12px}
+        .admin-badge{font-family:var(--mono);font-size:10px;font-weight:700;text-transform:uppercase;padding:2px 7px;border-radius:4px;background:#2a1e3a;color:#a78bfa}
+        .inline-error{font-family:var(--mono);font-size:11px;color:var(--danger);margin-top:6px;min-height:16px}
 
         /* Toast */
         #toast-container{position:fixed;bottom:24px;right:24px;z-index:9999;display:flex;flex-direction:column;gap:8px}
@@ -503,6 +513,10 @@
             <h6>Current Configuration</h6>
             <pre id="config-display" style="font-family:var(--mono);font-size:11px;color:var(--text-dim);margin:0;white-space:pre-wrap;overflow:auto;max-height:300px"></pre>
         </div>
+
+        <!-- User Management — only injected into the DOM when isAdmin === true -->
+        <!-- Populated dynamically by loadUserManagement() -->
+        <div id="user-mgmt-section"></div>
     </div>
 </div>
 
@@ -661,6 +675,7 @@ async function bootstrap(){
             if(meRes.status===401){showLogin();return;}
             currentUser=await meRes.json();
             applyUserToSidebar(currentUser);
+            loadUserManagement(); // enforce admin-only visibility on every login
         }catch{
             showLogin();return;
         }
@@ -693,7 +708,7 @@ function showPage(name){
     if(name==='assets')loadEntries(1);
     if(name==='archiver'){checkExtractionStatus();loadEntries(1)}
     if(name==='modder'){loadModderSessions();loadBlueprints()}
-    if(name==='config')loadConfig()
+    if(name==='config'){loadConfig();loadUserManagement();}
 }
 
 // ============================================================
@@ -1097,6 +1112,189 @@ async function saveConfig(){
         document.getElementById('config-status-card').style.display='';
         document.getElementById('config-display').textContent=JSON.stringify(config,null,2)
     }catch(err){if(!err.message.includes('Session expired'))toast(err.message,'error')}
+}
+
+// ============================================================
+// User Management (admin only — Config page)
+// ============================================================
+
+/**
+ * Inject or remove the User Management panel depending on admin status.
+ * Called from showPage('config') and after bootstrap.
+ */
+function loadUserManagement(){
+    const container=document.getElementById('user-mgmt-section');
+    if(!container)return;
+
+    // Only admins see this section — remove from DOM entirely for non-admins.
+    // Always clear first so stale admin content is never shown to a non-admin,
+    // regardless of what was previously injected in this browser session.
+    if(!currentUser||!currentUser.isAdmin){
+        container.innerHTML='';
+        return;
+    }
+
+    // Inject the markup (always, so the section is freshly rendered on each visit)
+    container.innerHTML=`
+        <div class="card-panel" id="user-mgmt-card">
+            <h6>User Management</h6>
+            <div style="overflow-x:auto;border:1px solid var(--border);border-radius:6px;margin-bottom:16px">
+                <table class="user-table" id="user-table">
+                    <thead><tr>
+                        <th>Username</th>
+                        <th>Role</th>
+                        <th style="width:120px">Action</th>
+                    </tr></thead>
+                    <tbody id="user-table-body">
+                        <tr><td colspan="3" style="padding:16px;text-align:center;color:var(--text-muted)">Loading...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <div style="background:var(--bg-panel);border:1px solid var(--border);border-radius:6px;padding:16px">
+                <div style="font-family:var(--mono);font-size:11px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:12px">Add User</div>
+                <div class="config-grid">
+                    <div class="form-field" style="margin-bottom:0">
+                        <label class="form-label">Username</label>
+                        <input type="text" class="form-control-dark" id="new-user-username" placeholder="username"
+                            onkeydown="if(event.key==='Enter')createUserSubmit()">
+                    </div>
+                    <div class="form-field" style="margin-bottom:0">
+                        <label class="form-label">Password</label>
+                        <input type="password" class="form-control-dark" id="new-user-password" placeholder="password"
+                            onkeydown="if(event.key==='Enter')createUserSubmit()">
+                    </div>
+                </div>
+                <div style="margin-top:10px;display:flex;align-items:center;gap:12px">
+                    <button class="btn-accent" id="btn-create-user" onclick="createUserSubmit()">
+                        <i class="bi bi-person-plus"></i> Create User
+                    </button>
+                    <span class="inline-error" id="create-user-error"></span>
+                </div>
+            </div>
+        </div>`;
+
+    // Fetch and render the user list
+    fetchAndRenderUsers();
+}
+
+async function fetchAndRenderUsers(){
+    const tbody=document.getElementById('user-table-body');
+    if(!tbody)return;
+    try{
+        const users=await api('GET','/users');
+        renderUserTable(users);
+    }catch(err){
+        if(!err.message.includes('Session expired'))
+            tbody.innerHTML=`<tr><td colspan="3" style="padding:12px;color:var(--danger);font-family:var(--mono);font-size:11px">
+                Failed to load users: ${err.message}</td></tr>`;
+    }
+}
+
+function renderUserTable(users){
+    const tbody=document.getElementById('user-table-body');
+    if(!tbody)return;
+    if(!users||users.length===0){
+        tbody.innerHTML='<tr><td colspan="3" style="padding:16px;text-align:center;color:var(--text-muted)">No users found.</td></tr>';
+        return;
+    }
+    tbody.innerHTML=users.map(u=>{
+        const isSelf=currentUser&&u.userId===currentUser.userId;
+        const removeBtnDisabled=isSelf?'disabled title="Cannot remove your own account"':'';
+        return`<tr>
+            <td style="color:var(--text)">${escapeHtml(u.username)}</td>
+            <td>${u.isAdmin?'<span class="admin-badge">Admin</span>':'<span style="color:var(--text-muted);font-family:var(--mono);font-size:11px">User</span>'}</td>
+            <td>
+                <button class="btn-danger" style="padding:3px 10px;font-size:11px"
+                    ${removeBtnDisabled}
+                    onclick="removeUser('${u.userId}','${escapeHtml(u.username)}')">
+                    <i class="bi bi-trash"></i> Remove
+                </button>
+            </td>
+        </tr>`;
+    }).join('');
+}
+
+async function createUserSubmit(){
+    const username=document.getElementById('new-user-username').value.trim();
+    const password=document.getElementById('new-user-password').value;
+    const errorEl=document.getElementById('create-user-error');
+    const btn=document.getElementById('btn-create-user');
+    errorEl.textContent='';
+
+    if(!username||!password){
+        errorEl.textContent='Username and password are required.';
+        return;
+    }
+
+    btn.disabled=true;
+    try{
+        const res=await fetch('/api/users',{
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            credentials:'same-origin',
+            body:JSON.stringify({username,password})
+        });
+        const body=await res.json().catch(()=>({}));
+        if(res.status===201){
+            document.getElementById('new-user-username').value='';
+            document.getElementById('new-user-password').value='';
+            toast('User created: '+username);
+            // Refresh the table — append to existing rows via full re-fetch
+            await fetchAndRenderUsers();
+        }else if(res.status===409){
+            errorEl.textContent='A user with that username already exists.';
+        }else if(res.status===400){
+            errorEl.textContent='Username and password are required.';
+        }else if(res.status===401){
+            showLogin();
+        }else{
+            errorEl.textContent=body.error||'Failed to create user.';
+        }
+    }catch{
+        errorEl.textContent='Could not reach the server.';
+    }finally{
+        btn.disabled=false;
+    }
+}
+
+async function removeUser(userId,username){
+    if(!confirm(`Remove user "${username}"? This cannot be undone.`))return;
+    try{
+        const res=await fetch(`/api/users/${userId}`,{
+            method:'DELETE',
+            credentials:'same-origin'
+        });
+        const body=await res.json().catch(()=>({}));
+        if(res.status===200){
+            toast('User removed: '+username);
+            await fetchAndRenderUsers();
+        }else if(res.status===400){
+            // Either self-deletion or last-admin guard
+            const msg=body.error||'';
+            if(msg.toLowerCase().includes('last admin')){
+                toast('Cannot remove the last admin account','warn');
+            }else{
+                toast('Cannot remove your own account','warn');
+            }
+        }else if(res.status===401){
+            showLogin();
+        }else if(res.status===403){
+            toast('Permission denied','error');
+        }else{
+            toast(body.error||'Failed to remove user.','error');
+        }
+    }catch{
+        toast('Could not reach the server.','error');
+    }
+}
+
+function escapeHtml(str){
+    return String(str)
+        .replace(/&/g,'&amp;')
+        .replace(/</g,'&lt;')
+        .replace(/>/g,'&gt;')
+        .replace(/"/g,'&quot;')
+        .replace(/'/g,'&#39;');
 }
 
 // ============================================================

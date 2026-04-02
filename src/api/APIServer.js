@@ -72,7 +72,6 @@ class APIServer {
 
     async start() {
         // Load or create the persisted session secret.
-        // Persisting across restarts means active sessions survive a server restart.
         if (!fs.existsSync(this.storeDir)) {
             fs.mkdirSync(this.storeDir, { recursive: true });
         }
@@ -84,10 +83,6 @@ class APIServer {
             fs.writeFileSync(secretPath, this.#sessionSecret, 'utf8');
         }
 
-        // Instantiate the real session middleware now that we have the secret.
-        // The deferred wrapper registered in #setupMiddleware() will call this
-        // on every request. The server is not yet listening at this point so
-        // no request can arrive before this assignment completes.
         this.#sessionMiddleware = session({
             secret:            this.#sessionSecret,
             resave:            false,
@@ -95,7 +90,6 @@ class APIServer {
             cookie: {
                 httpOnly: true,
                 sameSite: 'lax'
-                // secure: set to true when TLS is enabled
             }
         });
 
@@ -107,8 +101,6 @@ class APIServer {
         await this.#loadConfig();
         return new Promise((resolve) => {
             this.#httpServer = this.app.listen(this.port, () => {
-                // Store the actual bound port — important when port:0 is used
-                // (OS assigns a free port). Tests read this via srv.boundPort.
                 this.boundPort = this.#httpServer.address().port;
                 console.log(`DataPack Manager API running at http://localhost:${this.boundPort}`);
                 resolve();
@@ -118,8 +110,6 @@ class APIServer {
 
     /**
      * Close the underlying HTTP server.
-     * Releases the port and allows the process to exit cleanly.
-     * Used by tests — each test must call cleanup() which calls this.
      * @returns {Promise<void>}
      */
     close() {
@@ -140,11 +130,7 @@ class APIServer {
         }));
         this.app.use(express.json());
 
-        // Session middleware is inserted here as a deferred wrapper.
-        // #sessionMiddleware is set to the real express-session instance in
-        // start() once the secret has been loaded from disk. Until then,
-        // requests that arrive before start() completes call next() directly
-        // (the server is not listening yet at that point anyway).
+        // Session middleware is inserted as a deferred wrapper.
         this.app.use((req, res, next) => {
             if (this.#sessionMiddleware) {
                 this.#sessionMiddleware(req, res, next);
@@ -186,7 +172,6 @@ class APIServer {
 
         // Apply requireAuth to all routes in this router
         r.use((req, res, next) => {
-            // authMiddleware may not be initialised yet if routes are hit before start()
             if (!this.authMiddleware) {
                 return res.status(503).json({ error: 'Server not initialised' });
             }
@@ -218,6 +203,11 @@ class APIServer {
         r.post('/sessions/:id/discard',       this.#wrap(this.#discardSession.bind(this)));
         r.post('/sessions/:id/checkpoint',    this.#wrap(this.#checkpointSession.bind(this)));
 
+        // Users (admin only)
+        r.get('/users',        this.#adminWrap(this.#listUsers.bind(this)));
+        r.post('/users',       this.#adminWrap(this.#createUser.bind(this)));
+        r.delete('/users/:id', this.#adminWrap(this.#deleteUser.bind(this)));
+
         this.app.use('/api', r);
 
         // SPA catch-all (must be last)
@@ -244,7 +234,6 @@ class APIServer {
 
         const ip = req.ip || req.connection.remoteAddress || '127.0.0.1';
 
-        // Rate limit check
         if (!this.authMiddleware.checkRateLimit(ip)) {
             return res.status(429).json({ error: 'Too many attempts' });
         }
@@ -256,14 +245,13 @@ class APIServer {
             return res.status(401).json({ error: 'Invalid username or password' });
         }
 
-        // Successful login — reset rate limit and set session
         this.authMiddleware.resetRateLimit(ip);
         req.session.userId = user.userId;
 
         res.json({
-            userId:  user.userId,
+            userId:   user.userId,
             username: user.username,
-            isAdmin: user.isAdmin
+            isAdmin:  user.isAdmin
         });
     }
 
@@ -283,10 +271,58 @@ class APIServer {
         }
 
         res.json({
-            userId:  user.userId,
+            userId:   user.userId,
             username: user.username,
-            isAdmin: user.isAdmin
+            isAdmin:  user.isAdmin
         });
+    }
+
+    // ---------------------------------------------------------------------------
+    // User management handlers (admin only)
+    // ---------------------------------------------------------------------------
+
+    async #listUsers(_req, res) {
+        // passwordHash is stripped by UserStore.list()
+        res.json(this.userStore.list());
+    }
+
+    async #createUser(req, res) {
+        const { username, password } = req.body;
+
+        if (!username || !password) {
+            return res.status(400).json({ error: 'username and password are required' });
+        }
+
+        // Check for duplicate before calling create() so we can return 409
+        if (this.userStore.findByUsername(username)) {
+            return res.status(409).json({ error: `Username already taken: ${username}` });
+        }
+
+        const user = await this.userStore.create(username, password);
+        res.status(201).json(user); // create() already strips passwordHash
+    }
+
+    async #deleteUser(req, res) {
+        const targetId = req.params.id;
+
+        // Prevent self-deletion
+        if (req.user.userId === targetId) {
+            return res.status(400).json({ error: 'Cannot remove your own account' });
+        }
+
+        // Check existence before attempting removal
+        if (!this.userStore.findById(targetId)) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        try {
+            await this.userStore.remove(targetId);
+        } catch (err) {
+            // UserStore.remove() throws when removing the last admin
+            return res.status(400).json({ error: err.message });
+        }
+
+        res.json({ removed: true });
     }
 
     // ---------------------------------------------------------------------------
@@ -452,6 +488,7 @@ class APIServer {
     async #createSession(req, res) {
         if (!this.sessionManager) return res.status(503).json({ error: 'Not initialised' });
         const { label } = req.body;
+        // API contract: create(config, label) — config is FIRST, label is SECOND
         const session = await this.sessionManager.create(this.config, label || 'New Session');
         res.status(201).json(session.toJSON());
     }
@@ -539,8 +576,31 @@ class APIServer {
     // Private helpers
     // ---------------------------------------------------------------------------
 
+    /**
+     * Wrap an async handler for standard error handling (returns 500 on throw).
+     */
     #wrap(fn) {
         return async (req, res, next) => {
+            try {
+                await fn(req, res, next);
+            } catch (err) {
+                console.error(`[API Error] ${req.method} ${req.path}:`, err.message);
+                res.status(500).json({ error: err.message });
+            }
+        };
+    }
+
+    /**
+     * Wrap an async handler with admin-only protection.
+     * Returns 403 if the authenticated user is not an admin.
+     * Error handling mirrors #wrap().
+     */
+    #adminWrap(fn) {
+        return async (req, res, next) => {
+            // req.user is set by the requireAuth middleware already applied to this router
+            if (!req.user || !req.user.isAdmin) {
+                return res.status(403).json({ error: 'Forbidden' });
+            }
             try {
                 await fn(req, res, next);
             } catch (err) {
