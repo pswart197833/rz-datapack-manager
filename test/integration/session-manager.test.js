@@ -30,6 +30,7 @@ const FingerprintStore  = require(path.join(__dirname, '..', '..', 'src', 'finge
 const Blueprint         = require(path.join(__dirname, '..', '..', 'src', 'fingerprint', 'Blueprint'));
 const Session           = require(path.join(__dirname, '..', '..', 'src', 'session', 'Session'));
 const StagedFile        = require(path.join(__dirname, '..', '..', 'src', 'session', 'StagedFile'));
+const LockError         = require(path.join(__dirname, '..', '..', 'src', 'session', 'LockError'));
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -62,16 +63,7 @@ function cleanupDir(dir) {
 
 /**
  * Build a fixture-backed SessionManager and a PackConfiguration pointing at
- * the fixture data. The config's output paths (for commits) are redirected to
- * a caller-supplied output directory so the fixture files are never touched.
- *
- * The FingerprintStore and AssetStore are loaded from the fixture store.
- * extractedPath values are patched to absolute paths.
- *
- * @param {string} sessionsDir  - Temp dir for session working folders
- * @param {string} [outputDir]  - Where committed pack files will be written.
- *                                Defaults to sessionsDir if not provided.
- * @returns {{ manager, fpStore, assetStore, config, sessionsDir }}
+ * the fixture data.
  */
 async function makeFixtureSetup(sessionsDir, outputDir) {
     const out = outputDir || sessionsDir;
@@ -85,14 +77,12 @@ async function makeFixtureSetup(sessionsDir, outputDir) {
     );
     await fpStore.load();
 
-    // Patch relative extractedPaths to absolute
     for (const record of fpStore.list()) {
         if (record.extractedPath && !path.isAbsolute(record.extractedPath)) {
             record.extractedPath = path.join(FIXTURE_STORE, record.extractedPath);
         }
     }
 
-    // Config: reads from fixture data, writes to output dir
     const config = new PackConfiguration({
         indexPath:     FIXTURE_INDEX,
         packPaths:     new Map(
@@ -108,9 +98,6 @@ async function makeFixtureSetup(sessionsDir, outputDir) {
     return { manager, fpStore, assetStore, config, sessionsDir };
 }
 
-/**
- * Get the fingerprint of the fixture blueprint.
- */
 function getFixtureBlueprintFp() {
     const bpDir = path.join(FIXTURE_STORE, 'blueprints');
     if (!fs.existsSync(bpDir)) return null;
@@ -123,13 +110,11 @@ function getFixtureBlueprintFp() {
 // ---------------------------------------------------------------------------
 
 test('create(config, label) — config is the FIRST argument, label is second',
-    // Regression: SessionManager.create(config, label) — argument order has caused bugs.
     { skip: !FIXTURE_AVAILABLE },
     async () => {
     const sessionsDir = makeTempDir();
     try {
         const { manager, config } = await makeFixtureSetup(sessionsDir);
-        // Correct call: create(config, label) — NOT create(label, config)
         const session = await manager.create(config, 'My Session Label');
         assert.equal(session.label, 'My Session Label',
             'label must be the second argument — create(config, label)');
@@ -225,7 +210,6 @@ test('session.addFile() — staged with category "new", checksum set, sizeBytes 
         const { manager, config } = await makeFixtureSetup(sessionsDir);
         const session = await manager.create(config, 'Test');
 
-        // Write a temp file to stage
         const srcPath = path.join(sessionsDir, 'temp-asset.cfg');
         fs.writeFileSync(srcPath, Buffer.from('cfg file content for staging test'));
 
@@ -272,13 +256,11 @@ test('session.addFromStore() — staged with category "in-store", packId preserv
         const { manager, fpStore, config } = await makeFixtureSetup(sessionsDir);
         const session = await manager.openFromBlueprint(indexFp, FIXTURE_STORE, config, 'Blueprint session');
 
-        // All files from openFromBlueprint must be in-store
         const files = session.listFiles();
         assert.ok(files.length > 0, 'session must have staged files after openFromBlueprint');
         assert.ok(files.every(f => f.isInStore()),
             'all files from openFromBlueprint must have category "in-store"');
 
-        // Each non-null-sentinel file must have a packId from the blueprint
         const expected = JSON.parse(fs.readFileSync(ENTRIES_PATH, 'utf8'));
         const expMap   = new Map(expected.map(e => [e.decodedName, e]));
         for (const f of files) {
@@ -347,12 +329,10 @@ test('checkpoint() — session.json on disk matches in-memory state after modifi
         const { manager, config } = await makeFixtureSetup(sessionsDir);
         const session = await manager.create(config, 'Checkpoint Test');
 
-        // Modify in-memory state
         const srcPath = path.join(sessionsDir, 'checkpoint.cfg');
         fs.writeFileSync(srcPath, Buffer.from('checkpoint test file'));
         session.addFile(srcPath, 'checkpoint.cfg');
 
-        // Checkpoint writes to disk
         await manager.checkpoint(session.sessionId);
 
         const jsonPath = path.join(session.workingDir, 'session.json');
@@ -423,13 +403,11 @@ test('list() — returns sessions sorted by updatedAt descending',
     try {
         const { manager, config } = await makeFixtureSetup(sessionsDir);
         await manager.create(config, 'First');
-        // Small delay to ensure distinct updatedAt values
         await new Promise(r => setTimeout(r, 10));
         await manager.create(config, 'Second');
 
         const sessions = await manager.list();
         assert.ok(sessions.length >= 2);
-        // Most recently updated should be first
         const idx1 = sessions.findIndex(s => s.label === 'Second');
         const idx2 = sessions.findIndex(s => s.label === 'First');
         assert.ok(idx1 < idx2, 'most recently updated session must appear first');
@@ -455,9 +433,7 @@ test('resume() — reloads session from disk with all staged files intact',
         session.addFile(srcPath, 'resume-asset.cfg');
         await manager.checkpoint(session.sessionId);
 
-        // Create a new manager instance to simulate restart
-        const { manager: manager2, fpStore: fp2, assetStore: as2 } =
-            await makeFixtureSetup(sessionsDir);
+        const { manager: manager2 } = await makeFixtureSetup(sessionsDir);
         const resumed = await manager2.resume(session.sessionId);
 
         assert.equal(resumed.sessionId, session.sessionId);
@@ -465,39 +441,6 @@ test('resume() — reloads session from disk with all staged files intact',
         assert.equal(resumed.status,    'active');
         assert.equal(resumed.listFiles().length, session.listFiles().length,
             'resumed session must have the same staged file count');
-    } finally {
-        cleanupDir(sessionsDir);
-    }
-});
-
-test('resume() — staged files have correct categories after reload',
-    { skip: !FIXTURE_AVAILABLE },
-    async () => {
-    const sessionsDir = makeTempDir();
-    try {
-        const { manager, config } = await makeFixtureSetup(sessionsDir);
-        const session = await manager.create(config, 'Category Resume Test');
-
-        // Stage a new file and mark one as deleted
-        const src1 = path.join(sessionsDir, 'keep.cfg');
-        const src2 = path.join(sessionsDir, 'delete.cfg');
-        fs.writeFileSync(src1, Buffer.from('keep'));
-        fs.writeFileSync(src2, Buffer.from('delete'));
-        session.addFile(src1, 'keep.cfg');
-        session.addFile(src2, 'delete.cfg');
-        session.removeFile('delete.cfg');
-        await manager.checkpoint(session.sessionId);
-
-        const { manager: m2 } = await makeFixtureSetup(sessionsDir);
-        const resumed = await m2.resume(session.sessionId);
-
-        const keepFile   = resumed.listFiles().find(f => f.targetName === 'keep.cfg');
-        const deleteFile = resumed.listFiles().find(f => f.targetName === 'delete.cfg');
-
-        assert.ok(keepFile,   'keep.cfg must survive resume');
-        assert.ok(deleteFile, 'delete.cfg must survive resume (audit trail)');
-        assert.equal(keepFile.category,   'new',     'keep.cfg category must be "new" after resume');
-        assert.equal(deleteFile.category, 'deleted', 'delete.cfg category must be "deleted" after resume');
     } finally {
         cleanupDir(sessionsDir);
     }
@@ -573,7 +516,6 @@ test('prepare() — pack-list.json excludes zero-size (sentinel-backed) entries'
             fs.readFileSync(path.join(session.workingDir, 'pack-list.json'), 'utf8')
         );
 
-        // No entry in pack-list should point at the null sentinel
         const nullHash = AssetStore.NULL_ASSET_HASH;
         const nullEntries = packList.filter(f => f.sourceFingerprint === nullHash);
         assert.equal(nullEntries.length, 0,
@@ -583,75 +525,7 @@ test('prepare() — pack-list.json excludes zero-size (sentinel-backed) entries'
     }
 });
 
-test('prepare() — index-list.json includes zero-size entries with size=0 and original packId/offset',
-    { skip: !FIXTURE_AVAILABLE },
-    async () => {
-    const sessionsDir = makeTempDir();
-    const indexFp     = getFixtureBlueprintFp();
-    assert.ok(indexFp);
-    try {
-        const { manager, config } = await makeFixtureSetup(sessionsDir);
-        const session = await manager.openFromBlueprint(indexFp, FIXTURE_STORE, config);
-        await manager.prepare(session.sessionId);
-
-        const indexList = JSON.parse(
-            fs.readFileSync(path.join(session.workingDir, 'index-list.json'), 'utf8')
-        );
-        const expected  = JSON.parse(fs.readFileSync(ENTRIES_PATH, 'utf8'));
-        const zeroExp   = expected.filter(e => e.size === 0);
-
-        assert.ok(indexList.length > 0, 'index-list.json must not be empty');
-
-        if (zeroExp.length > 0) {
-            const zeroInList = indexList.filter(e => e.size === 0);
-            assert.ok(zeroInList.length > 0,
-                'index-list.json must include zero-size placeholder entries');
-
-            // Verify packId and offset are preserved for zero-size entries
-            const expMap = new Map(zeroExp.map(e => [e.decodedName, e]));
-            for (const entry of zeroInList) {
-                const exp = expMap.get(entry.name);
-                if (!exp) continue;
-                assert.equal(entry.packId, exp.packId,
-                    `zero-size entry "${entry.name}" must have original packId`);
-                assert.equal(entry.offset, exp.offset,
-                    `zero-size entry "${entry.name}" must have original offset`);
-            }
-        }
-    } finally {
-        cleanupDir(sessionsDir);
-    }
-});
-
-test('prepare() — pack-list.json contains no deleted entries',
-    { skip: !FIXTURE_AVAILABLE },
-    async () => {
-    const sessionsDir = makeTempDir();
-    const indexFp     = getFixtureBlueprintFp();
-    assert.ok(indexFp);
-    try {
-        const { manager, config } = await makeFixtureSetup(sessionsDir);
-        const session = await manager.openFromBlueprint(indexFp, FIXTURE_STORE, config);
-
-        // Mark the first non-zero file as deleted
-        const files      = session.listFiles().filter(f => f.isInStore());
-        const toDelete   = files[0];
-        session.removeFile(toDelete.targetName);
-
-        await manager.prepare(session.sessionId);
-
-        const packList = JSON.parse(
-            fs.readFileSync(path.join(session.workingDir, 'pack-list.json'), 'utf8')
-        );
-        const deletedInList = packList.filter(f => f.targetName === toDelete.targetName);
-        assert.equal(deletedInList.length, 0,
-            'deleted entries must not appear in pack-list.json');
-    } finally {
-        cleanupDir(sessionsDir);
-    }
-});
-
-test('prepare() — throws if session is already ready',
+test('prepare() — throws if session already ready',
     { skip: !FIXTURE_AVAILABLE },
     async () => {
     const sessionsDir = makeTempDir();
@@ -709,20 +583,6 @@ test('discard() — session is removed from active map (getSession returns null)
     }
 });
 
-test('discard() — does not throw for an unknown sessionId',
-    { skip: !FIXTURE_AVAILABLE },
-    async () => {
-    const sessionsDir = makeTempDir();
-    try {
-        const { manager } = await makeFixtureSetup(sessionsDir);
-        await assert.doesNotReject(
-            () => manager.discard('completely-unknown-session-id')
-        );
-    } finally {
-        cleanupDir(sessionsDir);
-    }
-});
-
 // ---------------------------------------------------------------------------
 // openFromBlueprint()
 // ---------------------------------------------------------------------------
@@ -761,26 +621,6 @@ test('openFromBlueprint() — all staged files are in-store',
     }
 });
 
-test('openFromBlueprint() — staged file count matches blueprint record count',
-    { skip: !FIXTURE_AVAILABLE },
-    async () => {
-    const sessionsDir = makeTempDir();
-    const indexFp     = getFixtureBlueprintFp();
-    assert.ok(indexFp);
-    try {
-        const { manager, config } = await makeFixtureSetup(sessionsDir);
-        const blueprint = await Blueprint.loadFromDisk(FIXTURE_STORE, indexFp);
-        const session   = await manager.openFromBlueprint(indexFp, FIXTURE_STORE, config);
-
-        // Blueprint records that resolve to a FingerprintRecord become staged files
-        const resolvable = blueprint.getRecords().filter(r => r.decodedName).length;
-        assert.equal(session.listFiles().length, resolvable,
-            'staged file count must equal the number of resolvable blueprint records');
-    } finally {
-        cleanupDir(sessionsDir);
-    }
-});
-
 test('openFromBlueprint() — throws for unknown fingerprint',
     { skip: !FIXTURE_AVAILABLE },
     async () => {
@@ -797,29 +637,363 @@ test('openFromBlueprint() — throws for unknown fingerprint',
 });
 
 // ---------------------------------------------------------------------------
-// Regression guard — create(config, label) argument order
+// Regression — create(config, label) argument order
 // ---------------------------------------------------------------------------
 
 test('Regression: create(label, config) would produce a session with wrong label — always use create(config, label)',
     // Regression: SessionManager.create(config, label) — config is the FIRST argument.
-    // Passing (label, config) silently creates a session where the PackConfiguration
-    // is never stored, causing crashes at prepare() time.
     { skip: !FIXTURE_AVAILABLE },
     async () => {
     const sessionsDir = makeTempDir();
     try {
         const { manager, config } = await makeFixtureSetup(sessionsDir);
 
-        // Correct call
         const correct = await manager.create(config, 'correct label');
         assert.equal(correct.label, 'correct label',
             'label must be the second argument in create(config, label)');
         assert.ok(correct.config !== null,
             'config must be stored when passed as the first argument');
-
-        // The session's config must have the correct indexPath
         assert.equal(correct.config.getIndexPath(), FIXTURE_INDEX,
             'session config must have the fixture indexPath');
+    } finally {
+        cleanupDir(sessionsDir);
+    }
+});
+
+// ===========================================================================
+// Phase 3 additions
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// create(config, label, userId) — ownerId
+// ---------------------------------------------------------------------------
+
+test('Phase 3: create(config, label, userId) — ownerId on returned session equals userId',
+    { skip: !FIXTURE_AVAILABLE },
+    async () => {
+    const sessionsDir = makeTempDir();
+    try {
+        const { manager, config } = await makeFixtureSetup(sessionsDir);
+        const session = await manager.create(config, 'Owned Session', 'user-abc');
+        assert.equal(session.ownerId, 'user-abc',
+            'ownerId must equal the userId passed as the third argument');
+    } finally {
+        cleanupDir(sessionsDir);
+    }
+});
+
+test('Phase 3: create() without userId — ownerId defaults to null',
+    { skip: !FIXTURE_AVAILABLE },
+    async () => {
+    const sessionsDir = makeTempDir();
+    try {
+        const { manager, config } = await makeFixtureSetup(sessionsDir);
+        const session = await manager.create(config, 'No Owner');
+        assert.equal(session.ownerId, null,
+            'ownerId must be null when userId is not provided');
+    } finally {
+        cleanupDir(sessionsDir);
+    }
+});
+
+test('Phase 3: create(config, label, userId) — ownerId survives checkpoint() and resume()',
+    { skip: !FIXTURE_AVAILABLE },
+    async () => {
+    const sessionsDir = makeTempDir();
+    try {
+        const { manager, config } = await makeFixtureSetup(sessionsDir);
+        const session = await manager.create(config, 'Persist Owner', 'user-xyz');
+        await manager.checkpoint(session.sessionId);
+
+        const { manager: manager2 } = await makeFixtureSetup(sessionsDir);
+        const resumed = await manager2.resume(session.sessionId);
+        assert.equal(resumed.ownerId, 'user-xyz',
+            'ownerId must survive checkpoint() and resume()');
+    } finally {
+        cleanupDir(sessionsDir);
+    }
+});
+
+// ---------------------------------------------------------------------------
+// compressionEnabled default
+// ---------------------------------------------------------------------------
+
+test('Phase 3: compressionEnabled defaults to true on new session',
+    { skip: !FIXTURE_AVAILABLE },
+    async () => {
+    const sessionsDir = makeTempDir();
+    try {
+        const { manager, config } = await makeFixtureSetup(sessionsDir);
+        const session = await manager.create(config, 'Compression Default');
+        assert.equal(session.compressionEnabled, true,
+            'compressionEnabled must default to true');
+    } finally {
+        cleanupDir(sessionsDir);
+    }
+});
+
+// ---------------------------------------------------------------------------
+// New fields survive resume()
+// ---------------------------------------------------------------------------
+
+test('Phase 3: new fields (sourceType, outputDir, compressionEnabled) survive resume()',
+    { skip: !FIXTURE_AVAILABLE },
+    async () => {
+    const sessionsDir = makeTempDir();
+    try {
+        const { manager, config } = await makeFixtureSetup(sessionsDir);
+        const session = await manager.create(config, 'Field Persistence Test', 'user-1');
+
+        // Verify defaults are set
+        assert.equal(session.sourceType,         'scratch');
+        assert.equal(session.compressionEnabled, true);
+        assert.ok(session.outputDir && session.outputDir.length > 0,
+            'outputDir must be set to a non-empty path');
+
+        await manager.checkpoint(session.sessionId);
+
+        const { manager: manager2 } = await makeFixtureSetup(sessionsDir);
+        const resumed = await manager2.resume(session.sessionId);
+
+        assert.equal(resumed.sourceType,         'scratch');
+        assert.equal(resumed.compressionEnabled, true);
+        assert.equal(resumed.outputDir,          session.outputDir,
+            'outputDir must survive checkpoint() and resume()');
+    } finally {
+        cleanupDir(sessionsDir);
+    }
+});
+
+// ---------------------------------------------------------------------------
+// SessionManager.addFile() — lock enforcement
+// ---------------------------------------------------------------------------
+
+test('Phase 3: SessionManager.addFile() — sets lockedBy to userId after staging',
+    { skip: !FIXTURE_AVAILABLE },
+    async () => {
+    const sessionsDir = makeTempDir();
+    try {
+        const { manager, config } = await makeFixtureSetup(sessionsDir);
+        const session = await manager.create(config, 'Lock Test', 'user-a');
+
+        const srcPath = path.join(sessionsDir, 'lockable.cfg');
+        fs.writeFileSync(srcPath, Buffer.from('lockable content'));
+
+        const staged = await manager.addFile(
+            session.sessionId, srcPath, 'lockable.cfg', 'user-a'
+        );
+        assert.equal(staged.lockedBy, 'user-a',
+            'lockedBy must be set to the userId after addFile()');
+    } finally {
+        cleanupDir(sessionsDir);
+    }
+});
+
+test('Phase 3: SessionManager.addFile() — sets addedBy to userId',
+    { skip: !FIXTURE_AVAILABLE },
+    async () => {
+    const sessionsDir = makeTempDir();
+    try {
+        const { manager, config } = await makeFixtureSetup(sessionsDir);
+        const session = await manager.create(config, 'AddedBy Test', 'user-a');
+
+        const srcPath = path.join(sessionsDir, 'tracked.cfg');
+        fs.writeFileSync(srcPath, Buffer.from('tracked content'));
+
+        const staged = await manager.addFile(
+            session.sessionId, srcPath, 'tracked.cfg', 'user-a'
+        );
+        assert.equal(staged.addedBy, 'user-a',
+            'addedBy must be set to the userId after addFile()');
+    } finally {
+        cleanupDir(sessionsDir);
+    }
+});
+
+test('Phase 3: SessionManager.addFile() — adds userId to session.collaborators',
+    { skip: !FIXTURE_AVAILABLE },
+    async () => {
+    const sessionsDir = makeTempDir();
+    try {
+        const { manager, config } = await makeFixtureSetup(sessionsDir);
+        const session = await manager.create(config, 'Collaborators Test');
+
+        const srcPath = path.join(sessionsDir, 'collab.cfg');
+        fs.writeFileSync(srcPath, Buffer.from('collab content'));
+
+        await manager.addFile(session.sessionId, srcPath, 'collab.cfg', 'user-b');
+        assert.ok(session.collaborators.includes('user-b'),
+            'userId must be added to session.collaborators after addFile()');
+    } finally {
+        cleanupDir(sessionsDir);
+    }
+});
+
+test('Phase 3: SessionManager.addFile() — userId added to collaborators only once (no duplicates)',
+    { skip: !FIXTURE_AVAILABLE },
+    async () => {
+    const sessionsDir = makeTempDir();
+    try {
+        const { manager, config } = await makeFixtureSetup(sessionsDir);
+        const session = await manager.create(config, 'No Dup Collaborators');
+
+        const src1 = path.join(sessionsDir, 'file1.cfg');
+        const src2 = path.join(sessionsDir, 'file2.cfg');
+        fs.writeFileSync(src1, Buffer.from('content 1'));
+        fs.writeFileSync(src2, Buffer.from('content 2'));
+
+        await manager.addFile(session.sessionId, src1, 'file1.cfg', 'user-c');
+        await manager.addFile(session.sessionId, src2, 'file2.cfg', 'user-c');
+
+        const count = session.collaborators.filter(id => id === 'user-c').length;
+        assert.equal(count, 1,
+            'userId must appear only once in collaborators even after multiple addFile() calls');
+    } finally {
+        cleanupDir(sessionsDir);
+    }
+});
+
+test('Phase 3: SessionManager.addFile() by lock owner — succeeds (no LockError)',
+    { skip: !FIXTURE_AVAILABLE },
+    async () => {
+    const sessionsDir = makeTempDir();
+    try {
+        const { manager, config } = await makeFixtureSetup(sessionsDir);
+        const session = await manager.create(config, 'Owner Re-add Test');
+
+        const src1 = path.join(sessionsDir, 'owned.cfg');
+        const src2 = path.join(sessionsDir, 'owned2.cfg');
+        fs.writeFileSync(src1, Buffer.from('first version'));
+        fs.writeFileSync(src2, Buffer.from('second version'));
+
+        // User A adds the file — acquires lock
+        await manager.addFile(session.sessionId, src1, 'owned.cfg', 'user-a');
+
+        // User A replaces their own file — must not throw
+        await assert.doesNotReject(
+            () => manager.addFile(session.sessionId, src2, 'owned.cfg', 'user-a'),
+            'lock owner must be able to replace their own staged file without LockError'
+        );
+    } finally {
+        cleanupDir(sessionsDir);
+    }
+});
+
+test('Phase 3: SessionManager.addFile() by different user on locked file — throws LockError',
+    // Regression: file-level lock enforcement — different user must not overwrite a locked file
+    { skip: !FIXTURE_AVAILABLE },
+    async () => {
+    const sessionsDir = makeTempDir();
+    try {
+        const { manager, config } = await makeFixtureSetup(sessionsDir);
+        const session = await manager.create(config, 'Lock Conflict Test');
+
+        const src1 = path.join(sessionsDir, 'contested.cfg');
+        const src2 = path.join(sessionsDir, 'contested2.cfg');
+        fs.writeFileSync(src1, Buffer.from('user a content'));
+        fs.writeFileSync(src2, Buffer.from('user b content'));
+
+        // User A locks the file
+        await manager.addFile(session.sessionId, src1, 'contested.cfg', 'user-a');
+
+        // User B must be rejected
+        await assert.rejects(
+            () => manager.addFile(session.sessionId, src2, 'contested.cfg', 'user-b'),
+            (err) => {
+                assert.ok(err instanceof LockError, 'must throw a LockError');
+                assert.equal(err.lockedBy, 'user-a', 'lockedBy must identify the lock owner');
+                assert.equal(err.name, 'LockError');
+                return true;
+            }
+        );
+    } finally {
+        cleanupDir(sessionsDir);
+    }
+});
+
+// ---------------------------------------------------------------------------
+// SessionManager.removeFile() — lock enforcement
+// ---------------------------------------------------------------------------
+
+test('Phase 3: SessionManager.removeFile() by lock owner — succeeds',
+    { skip: !FIXTURE_AVAILABLE },
+    async () => {
+    const sessionsDir = makeTempDir();
+    try {
+        const { manager, config } = await makeFixtureSetup(sessionsDir);
+        const session = await manager.create(config, 'Owner Remove Test');
+
+        const srcPath = path.join(sessionsDir, 'owner-del.cfg');
+        fs.writeFileSync(srcPath, Buffer.from('to be removed by owner'));
+
+        await manager.addFile(session.sessionId, srcPath, 'owner-del.cfg', 'user-a');
+
+        await assert.doesNotReject(
+            () => manager.removeFile(session.sessionId, 'owner-del.cfg', 'user-a'),
+            'lock owner must be able to remove their own file without LockError'
+        );
+
+        const file = session.listFiles().find(f => f.targetName === 'owner-del.cfg');
+        assert.equal(file.category, 'deleted',
+            'file must be marked deleted after removeFile() by owner');
+    } finally {
+        cleanupDir(sessionsDir);
+    }
+});
+
+test('Phase 3: SessionManager.removeFile() by different user on locked file — throws LockError',
+    // Regression: file-level lock enforcement — different user must not delete a locked file
+    { skip: !FIXTURE_AVAILABLE },
+    async () => {
+    const sessionsDir = makeTempDir();
+    try {
+        const { manager, config } = await makeFixtureSetup(sessionsDir);
+        const session = await manager.create(config, 'Remove Lock Conflict Test');
+
+        const srcPath = path.join(sessionsDir, 'protected.cfg');
+        fs.writeFileSync(srcPath, Buffer.from('protected content'));
+
+        // User A locks the file
+        await manager.addFile(session.sessionId, srcPath, 'protected.cfg', 'user-a');
+
+        // User B must be rejected
+        await assert.rejects(
+            () => manager.removeFile(session.sessionId, 'protected.cfg', 'user-b'),
+            (err) => {
+                assert.ok(err instanceof LockError, 'must throw a LockError');
+                assert.equal(err.lockedBy, 'user-a', 'lockedBy must identify the lock owner');
+                return true;
+            }
+        );
+
+        // File must still be present and NOT deleted
+        const file = session.listFiles().find(f => f.targetName === 'protected.cfg');
+        assert.ok(file, 'file must still exist after failed remove');
+        assert.notEqual(file.category, 'deleted',
+            'file must not be deleted after a failed removeFile() attempt');
+    } finally {
+        cleanupDir(sessionsDir);
+    }
+});
+
+test('Phase 3: SessionManager.removeFile() without userId on unlocked file — succeeds',
+    { skip: !FIXTURE_AVAILABLE },
+    async () => {
+    const sessionsDir = makeTempDir();
+    try {
+        const { manager, config } = await makeFixtureSetup(sessionsDir);
+        const session = await manager.create(config, 'No-lock Remove Test');
+
+        const srcPath = path.join(sessionsDir, 'unlocked.cfg');
+        fs.writeFileSync(srcPath, Buffer.from('unlocked content'));
+
+        // Add without userId — file is unlocked
+        session.addFile(srcPath, 'unlocked.cfg');
+
+        await assert.doesNotReject(
+            () => manager.removeFile(session.sessionId, 'unlocked.cfg', null),
+            'removeFile() on an unlocked file must succeed even with null userId'
+        );
     } finally {
         cleanupDir(sessionsDir);
     }

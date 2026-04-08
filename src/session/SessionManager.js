@@ -5,6 +5,7 @@ const path             = require('path');
 const { v4: uuidv4 }   = require('uuid');
 const Session          = require('./Session');
 const StagedFile       = require('./StagedFile');
+const LockError        = require('./LockError');
 const PackConfiguration = require('../config/PackConfiguration');
 const Blueprint        = require('../fingerprint/Blueprint');
 const AssetStore       = require('../core/AssetStore');
@@ -53,21 +54,26 @@ class SessionManager {
     /**
      * Create a new empty session.
      *
+     * API contract: config is the FIRST argument, label is SECOND, userId is THIRD.
+     * Never call as create(label, config) — that is a bug.
+     *
      * @param {PackConfiguration} config
      * @param {string}            [label]
+     * @param {string|null}       [userId]  - userId of the creating user (stored as ownerId)
      * @returns {Promise<Session>}
      */
-    async create(config, label = '') {
+    async create(config, label = '', userId = null) {
         const sessionId  = uuidv4();
         const workingDir = path.join(this.sessionsDir, sessionId);
         fs.mkdirSync(workingDir, { recursive: true });
 
         const session = new Session({
             sessionId,
-            label: label || `Session ${new Date().toISOString().slice(0, 10)}`,
+            label:   label || `Session ${new Date().toISOString().slice(0, 10)}`,
             workingDir,
-            status: 'active',
-            config
+            status:  'active',
+            config,
+            ownerId: userId
         });
 
         this.#activeSessions.set(sessionId, session);
@@ -93,11 +99,6 @@ class SessionManager {
      *
      * FIX: StagedFile.sourceFingerprint is set to record.fileFingerprint (the hash
      * stored in the blueprint) rather than fileRecord.hash (the getByName() result).
-     * getByName() is last-write-wins and may return a later real-content-hash record
-     * whose hash the AssetStore was never populated with (e.g. in a fixture store
-     * that only contains stub-hash files). The blueprint's own fileFingerprint always
-     * refers to the hash that was used when the blueprint was built, which is
-     * guaranteed to be resolvable in the AssetStore that was active at that time.
      *
      * @param {string}            indexFingerprint - SHA-256 of data.000 to open from
      * @param {string}            storeDir         - Root store directory for blueprint lookup
@@ -127,19 +128,10 @@ class SessionManager {
         });
 
         // Pre-populate staged files from blueprint — lazily, no file I/O yet.
-        //
-        // sourceFingerprint is set to record.fileFingerprint — the hash the blueprint
-        // recorded when it was built — NOT fileRecord.hash from getByName().
-        // getByName() is last-write-wins: a later extractAll() may register a new
-        // real-content-hash record under the same name, making it the getByName()
-        // winner. That newer hash may not exist in the AssetStore (e.g. the fixture
-        // store only contains files under their stub hashes). Using record.fileFingerprint
-        // ensures the staged file always resolves via the hash the AssetStore knows about.
         for (const record of blueprint.getRecords()) {
             const fileRecord = record.resolveFile(this.fingerprintStore);
             if (!fileRecord) continue;
 
-            // Use record.fileFingerprint (blueprint hash) — not fileRecord.hash (getByName winner)
             const staged = session.addFromStore(record.fileFingerprint, fileRecord.decodedName);
             if (staged) {
                 staged.packId     = record.packId;
@@ -215,21 +207,81 @@ class SessionManager {
     }
 
     // ---------------------------------------------------------------------------
+    // File operations with lock enforcement (Phase 3)
+    // ---------------------------------------------------------------------------
+
+    /**
+     * Add a file from the filesystem to a session, with lock checking.
+     *
+     * If a StagedFile already exists for targetName and is locked by a different
+     * user, throws LockError. On success, sets lockedBy to userId and adds userId
+     * to session.collaborators.
+     *
+     * @param {string}      sessionId
+     * @param {string}      sourcePath  - Absolute path to the source file on disk
+     * @param {string}      targetName  - Intended decoded filename in the final pack
+     * @param {string|null} [userId]    - userId of the requesting user
+     * @returns {Promise<StagedFile>}
+     * @throws {LockError} if another user holds the lock on this targetName
+     */
+    async addFile(sessionId, sourcePath, targetName, userId = null) {
+        const session = await this.#requireSession(sessionId);
+
+        // Check for an existing lock held by a different user
+        const existing = session._fileMap.get(targetName);
+        if (existing && existing.isLocked() && existing.lockedBy !== userId) {
+            throw new LockError(existing.lockedBy);
+        }
+
+        const staged = session.addFile(sourcePath, targetName);
+
+        // Set lock and record collaborator
+        if (userId) {
+            staged.addedBy  = userId;
+            staged.lockedBy = userId;
+            if (!session.collaborators.includes(userId)) {
+                session.collaborators.push(userId);
+            }
+        }
+
+        session.updatedAt = new Date();
+        await this.checkpoint(sessionId);
+        return staged;
+    }
+
+    /**
+     * Mark a staged file as deleted, with lock checking.
+     *
+     * If the file is locked by a different user, throws LockError.
+     *
+     * @param {string}      sessionId
+     * @param {string}      targetName
+     * @param {string|null} [userId]   - userId of the requesting user
+     * @returns {Promise<boolean>} true if found and marked deleted
+     * @throws {LockError} if another user holds the lock on this targetName
+     */
+    async removeFile(sessionId, targetName, userId = null) {
+        const session = await this.#requireSession(sessionId);
+
+        const file = session._fileMap.get(targetName);
+        if (file && file.isLocked() && file.lockedBy !== userId) {
+            throw new LockError(file.lockedBy);
+        }
+
+        const removed = session.removeFile(targetName);
+        if (removed) {
+            await this.checkpoint(sessionId);
+        }
+        return removed;
+    }
+
+    // ---------------------------------------------------------------------------
     // Phase 1 — Prepare
     // ---------------------------------------------------------------------------
 
     /**
      * Phase 1 — compose and write the final ordered asset lists to disk.
      * Transitions session status to 'ready'.
-     *
-     * Writes two files:
-     *
-     *   pack-list.json  — StagedFile records for real (non-zero-size) assets only,
-     *                     sorted by packId then packOffset for byte-identical reconstruction.
-     *
-     *   index-list.json — ALL entries in original indexOffset order including zero-size
-     *                     placeholders. Format: { name, packId, offset, size }
-     *                     where size === 0 means placeholder (no pack bytes written).
      *
      * @param {string} sessionId
      * @returns {Promise<void>}
@@ -298,9 +350,6 @@ class SessionManager {
         // -----------------------------------------------------------------
         // index-list.json
         // ALL entries in original indexOffset order, zero-size included.
-        // Each entry: { name, packId, offset, size }
-        //   size === null  → real asset, offset assigned by DataPackWriter
-        //   size === 0     → zero-size placeholder, original offset preserved
         // -----------------------------------------------------------------
         let indexNames;
 
@@ -317,13 +366,10 @@ class SessionManager {
                     name:   r.decodedName,
                     packId: r.packId,
                     offset: r.packOffset,
-                    // null = real asset (offset comes from DataPackWriter)
-                    // 0    = zero-size placeholder (original offset preserved)
                     size:   isZero ? 0 : null
                 };
             });
         } else {
-            // Fresh build — no blueprint, no originals to match
             const indexSorted = [...allFiles].sort((a, b) => {
                 if (!indexOrderMap) return 0;
                 const ia = indexOrderMap.get(a.targetName) ?? 0;

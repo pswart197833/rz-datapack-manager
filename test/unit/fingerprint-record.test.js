@@ -5,6 +5,9 @@
  * Tier 1 — pure in-memory unit tests for FingerprintRecord.
  * Zero filesystem I/O. Standalone runnable:
  *   node test/unit/fingerprint-record.test.js
+ *
+ * NOTE: This file contains ALL tests for FingerprintRecord, including the
+ * Phase 3 additions for the verificationFailed field at the bottom.
  */
 
 const { test } = require('node:test');
@@ -116,7 +119,7 @@ test('constructor — no-argument call does not throw', () => {
 });
 
 // ---------------------------------------------------------------------------
-// toJSON / fromJSON round-trip — all 9 fields
+// toJSON / fromJSON round-trip — all 9 original fields
 // ---------------------------------------------------------------------------
 
 test('toJSON / fromJSON — hash survives round-trip', () => {
@@ -207,7 +210,6 @@ test('alias model — alias record has isAlias=true and aliasOf pointing to cano
 });
 
 test('alias model — isAlias is strictly boolean (not truthy coercion)', () => {
-    // fromJSON uses `=== true` guard so truthy strings should not produce isAlias=true
     const r = FingerprintRecord.fromJSON({
         hash: 'aaa', type: 'asset', decodedName: 'hero.dds',
         isAlias: false, aliasOf: null,
@@ -220,7 +222,7 @@ test('alias model — isAlias is strictly boolean (not truthy coercion)', () => 
 // toJSON shape
 // ---------------------------------------------------------------------------
 
-test('toJSON — contains all 9 expected fields', () => {
+test('toJSON — contains all 9 original expected fields', () => {
     const r    = new FingerprintRecord({
         hash: 'aaa', type: 'asset', decodedName: 'hero.dds',
         size: 512, extractedPath: '/store/aa/aaa.dds',
@@ -239,4 +241,67 @@ test('toJSON — date is serialised as an ISO string', () => {
     const json = r.toJSON();
     assert.equal(typeof json.date, 'string');
     assert.doesNotThrow(() => new Date(json.date));
+});
+
+// ---------------------------------------------------------------------------
+// Phase 3 — verificationFailed field
+// ---------------------------------------------------------------------------
+
+test('verificationFailed — defaults to false', () => {
+    const r = new FingerprintRecord({ hash: 'aaa', type: 'asset', decodedName: 'hero.dds' });
+    assert.equal(r.verificationFailed, false);
+});
+
+test('verificationFailed — no-argument constructor defaults to false', () => {
+    const r = new FingerprintRecord();
+    assert.equal(r.verificationFailed, false);
+});
+
+test('verificationFailed: true — survives toJSON / fromJSON round-trip', () => {
+    const r       = new FingerprintRecord({
+        hash: 'aaa', type: 'asset', decodedName: 'hero.dds',
+        verificationFailed: true
+    });
+    const restored = FingerprintRecord.fromJSON(r.toJSON());
+    assert.equal(restored.verificationFailed, true);
+});
+
+test('verificationFailed: false — survives toJSON / fromJSON round-trip', () => {
+    const r       = new FingerprintRecord({
+        hash: 'aaa', type: 'asset', decodedName: 'hero.dds',
+        verificationFailed: false
+    });
+    const restored = FingerprintRecord.fromJSON(r.toJSON());
+    assert.equal(restored.verificationFailed, false);
+});
+
+test('verificationFailed — fromJSON with missing field defaults to false', () => {
+    // Simulates loading a record written before Phase 3 that has no verificationFailed key
+    const legacy = {
+        hash: 'aaa', type: 'asset', decodedName: 'hero.dds',
+        size: 0, extractedPath: null, verified: false,
+        date: new Date().toISOString(), isAlias: false, aliasOf: null
+        // verificationFailed intentionally absent
+    };
+    const restored = FingerprintRecord.fromJSON(legacy);
+    assert.equal(restored.verificationFailed, false,
+        'legacy records without verificationFailed must default to false');
+});
+
+test('verificationFailed — is strictly boolean (not truthy coercion)', () => {
+    // fromJSON uses === true guard — any truthy non-boolean must not become true
+    const r = FingerprintRecord.fromJSON({
+        hash: 'aaa', type: 'asset', decodedName: 'hero.dds',
+        verificationFailed: false,
+        size: 0, extractedPath: null, verified: false,
+        date: new Date().toISOString(), isAlias: false, aliasOf: null
+    });
+    assert.strictEqual(r.verificationFailed, false);
+});
+
+test('toJSON — verificationFailed field is present in output', () => {
+    const r    = new FingerprintRecord({ hash: 'aaa', type: 'asset', decodedName: 'hero.dds' });
+    const json = r.toJSON();
+    assert.ok(Object.prototype.hasOwnProperty.call(json, 'verificationFailed'),
+        'toJSON() must include verificationFailed field');
 });

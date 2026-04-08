@@ -20,6 +20,17 @@ const crypto = require('crypto');
  * checksum is SHA-256 of staged content for session integrity only.
  * It is NOT the permanent FingerprintRecord hash — that is computed
  * from the real asset content during CommitPipeline Phase 3.
+ *
+ * Phase 3 additions:
+ *   addedBy       — userId who staged this file (audit trail)
+ *   lockedBy      — userId holding a hard lock, or null
+ *   isAlias       — true if this entry is a pack alias
+ *   aliasOf       — decoded name of the canonical entry (if isAlias)
+ *   conflictStatus — 'unresolved' | 'resolved-a' | 'resolved-b' | null
+ *
+ * lock(userId)  — acquire a hard lock on this file
+ * unlock()      — release the hard lock
+ * isLocked()    — true when lockedBy is non-null
  */
 
 class StagedFile {
@@ -34,6 +45,12 @@ class StagedFile {
      * @param {number}      opts.sizeBytes         - File size in bytes
      * @param {string}      opts.checksum          - SHA-256 of staged content
      * @param {Date}        opts.stagedAt          - When added to the session
+     * @param {number|null} opts.packId            - original packId from blueprint — null for new assets
+     * @param {string|null} opts.addedBy           - userId who staged this file
+     * @param {string|null} opts.lockedBy          - userId holding a hard lock, or null
+     * @param {boolean}     opts.isAlias           - true if this entry is a pack alias
+     * @param {string|null} opts.aliasOf           - decoded name of the canonical entry (if isAlias)
+     * @param {string|null} opts.conflictStatus    - 'unresolved' | 'resolved-a' | 'resolved-b' | null
      */
     constructor({
         targetName,
@@ -44,7 +61,13 @@ class StagedFile {
         sizeBytes         = 0,
         checksum          = null,
         stagedAt          = null,
-        packId            = null
+        packId            = null,
+        // Phase 3 additions
+        addedBy           = null,
+        lockedBy          = null,
+        isAlias           = false,
+        aliasOf           = null,
+        conflictStatus    = null
     } = {}) {
         this.targetName        = targetName;
         this.sourcePath        = sourcePath;
@@ -54,7 +77,13 @@ class StagedFile {
         this.sizeBytes         = sizeBytes;
         this.checksum          = checksum;
         this.stagedAt          = stagedAt instanceof Date ? stagedAt : new Date();
-        this.packId            = packId; // original packId from blueprint — null for new assets
+        this.packId            = packId;
+        // Phase 3 fields
+        this.addedBy        = addedBy        || null;
+        this.lockedBy       = lockedBy       || null;
+        this.isAlias        = isAlias        === true;
+        this.aliasOf        = aliasOf        || null;
+        this.conflictStatus = conflictStatus || null;
     }
 
     // ---------------------------------------------------------------------------
@@ -76,6 +105,36 @@ class StagedFile {
      */
     markDeleted() {
         this.category = 'deleted';
+    }
+
+    // ---------------------------------------------------------------------------
+    // Lock management (Phase 3)
+    // ---------------------------------------------------------------------------
+
+    /**
+     * Returns true when another user holds a hard lock on this file.
+     * @returns {boolean}
+     */
+    isLocked() {
+        return this.lockedBy !== null;
+    }
+
+    /**
+     * Acquire a hard lock on this file for the given userId.
+     * The lock prevents other users from modifying or deleting this file.
+     *
+     * @param {string} userId
+     */
+    lock(userId) {
+        this.lockedBy = userId;
+    }
+
+    /**
+     * Release the hard lock on this file.
+     * Safe to call when no lock is held.
+     */
+    unlock() {
+        this.lockedBy = null;
     }
 
     // ---------------------------------------------------------------------------
@@ -147,7 +206,13 @@ class StagedFile {
             sizeBytes:         this.sizeBytes,
             checksum:          this.checksum,
             stagedAt:          this.stagedAt.toISOString(),
-            packId:            this.packId
+            packId:            this.packId,
+            // Phase 3 fields
+            addedBy:           this.addedBy,
+            lockedBy:          this.lockedBy,
+            isAlias:           this.isAlias,
+            aliasOf:           this.aliasOf,
+            conflictStatus:    this.conflictStatus
         };
     }
 
@@ -165,7 +230,13 @@ class StagedFile {
             sizeBytes:         obj.sizeBytes         || 0,
             checksum:          obj.checksum          || null,
             stagedAt:          obj.stagedAt ? new Date(obj.stagedAt) : new Date(),
-            packId:            obj.packId            || null
+            packId:            obj.packId            || null,
+            // Phase 3 fields — safe defaults if absent (backwards compatibility)
+            addedBy:           obj.addedBy           || null,
+            lockedBy:          obj.lockedBy          || null,
+            isAlias:           obj.isAlias           === true,
+            aliasOf:           obj.aliasOf           || null,
+            conflictStatus:    obj.conflictStatus    || null
         });
     }
 

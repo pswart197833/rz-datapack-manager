@@ -282,7 +282,6 @@ class APIServer {
     // ---------------------------------------------------------------------------
 
     async #listUsers(_req, res) {
-        // passwordHash is stripped by UserStore.list()
         res.json(this.userStore.list());
     }
 
@@ -293,24 +292,21 @@ class APIServer {
             return res.status(400).json({ error: 'username and password are required' });
         }
 
-        // Check for duplicate before calling create() so we can return 409
         if (this.userStore.findByUsername(username)) {
             return res.status(409).json({ error: `Username already taken: ${username}` });
         }
 
         const user = await this.userStore.create(username, password);
-        res.status(201).json(user); // create() already strips passwordHash
+        res.status(201).json(user);
     }
 
     async #deleteUser(req, res) {
         const targetId = req.params.id;
 
-        // Prevent self-deletion
         if (req.user.userId === targetId) {
             return res.status(400).json({ error: 'Cannot remove your own account' });
         }
 
-        // Check existence before attempting removal
         if (!this.userStore.findById(targetId)) {
             return res.status(404).json({ error: 'User not found' });
         }
@@ -318,7 +314,6 @@ class APIServer {
         try {
             await this.userStore.remove(targetId);
         } catch (err) {
-            // UserStore.remove() throws when removing the last admin
             return res.status(400).json({ error: err.message });
         }
 
@@ -488,8 +483,12 @@ class APIServer {
     async #createSession(req, res) {
         if (!this.sessionManager) return res.status(503).json({ error: 'Not initialised' });
         const { label } = req.body;
-        // API contract: create(config, label) — config is FIRST, label is SECOND
-        const session = await this.sessionManager.create(this.config, label || 'New Session');
+        // API contract: create(config, label, userId) — config FIRST, label SECOND, userId THIRD
+        const session = await this.sessionManager.create(
+            this.config,
+            label || 'New Session',
+            req.user.userId
+        );
         res.status(201).json(session.toJSON());
     }
 
@@ -518,24 +517,59 @@ class APIServer {
 
     async #addSessionFile(req, res) {
         if (!this.sessionManager) return res.status(503).json({ error: 'Not initialised' });
-        const s = this.sessionManager.getSession(req.params.id);
-        if (!s) return res.status(404).json({ error: 'Session not found' });
         const { sourcePath, targetName } = req.body;
         if (!sourcePath || !targetName) {
             return res.status(400).json({ error: 'sourcePath and targetName are required' });
         }
-        const staged = s.addFile(sourcePath, targetName);
-        await this.sessionManager.checkpoint(req.params.id);
-        res.status(201).json(staged.toJSON());
+
+        try {
+            // Route through SessionManager.addFile() so lock checking is enforced
+            const staged = await this.sessionManager.addFile(
+                req.params.id,
+                sourcePath,
+                targetName,
+                req.user.userId
+            );
+            res.status(201).json(staged.toJSON());
+        } catch (err) {
+            if (err.name === 'LockError') {
+                return res.status(423).json({
+                    error:            'File is locked',
+                    lockedBy:         err.lockedBy,
+                    lockedByUsername: err.lockedByUsername
+                });
+            }
+            if (err.message && err.message.includes('Session not found')) {
+                return res.status(404).json({ error: 'Session not found' });
+            }
+            throw err; // re-throw for #wrap() to catch as 500
+        }
     }
 
     async #removeSessionFile(req, res) {
         if (!this.sessionManager) return res.status(503).json({ error: 'Not initialised' });
-        const s = this.sessionManager.getSession(req.params.id);
-        if (!s) return res.status(404).json({ error: 'Session not found' });
-        const removed = s.removeFile(decodeURIComponent(req.params.name));
-        if (removed) await this.sessionManager.checkpoint(req.params.id);
-        res.json({ removed });
+
+        try {
+            // Route through SessionManager.removeFile() so lock checking is enforced
+            const removed = await this.sessionManager.removeFile(
+                req.params.id,
+                decodeURIComponent(req.params.name),
+                req.user.userId
+            );
+            res.json({ removed });
+        } catch (err) {
+            if (err.name === 'LockError') {
+                return res.status(423).json({
+                    error:            'File is locked',
+                    lockedBy:         err.lockedBy,
+                    lockedByUsername: err.lockedByUsername
+                });
+            }
+            if (err.message && err.message.includes('Session not found')) {
+                return res.status(404).json({ error: 'Session not found' });
+            }
+            throw err; // re-throw for #wrap() to catch as 500
+        }
     }
 
     async #prepareSession(req, res) {
@@ -593,11 +627,9 @@ class APIServer {
     /**
      * Wrap an async handler with admin-only protection.
      * Returns 403 if the authenticated user is not an admin.
-     * Error handling mirrors #wrap().
      */
     #adminWrap(fn) {
         return async (req, res, next) => {
-            // req.user is set by the requireAuth middleware already applied to this router
             if (!req.user || !req.user.isAdmin) {
                 return res.status(403).json({ error: 'Forbidden' });
             }

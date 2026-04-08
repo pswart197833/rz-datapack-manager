@@ -30,16 +30,23 @@ class Session {
 
     /**
      * @param {object}            opts
-     * @param {string}            opts.sessionId      - UUID
-     * @param {string}            opts.label          - User-friendly name
-     * @param {string}            opts.workingDir     - Temp directory path
-     * @param {string}            opts.status         - Session status enum
-     * @param {PackConfiguration} opts.config         - Target pack configuration
-     * @param {string|null}       opts.blueprintRef   - indexFingerprint of source blueprint
+     * @param {string}            opts.sessionId         - UUID
+     * @param {string}            opts.label             - User-friendly name
+     * @param {string}            opts.workingDir        - Temp directory path
+     * @param {string}            opts.status            - Session status enum
+     * @param {PackConfiguration} opts.config            - Target pack configuration
+     * @param {string|null}       opts.blueprintRef      - indexFingerprint of source blueprint
      * @param {boolean}           opts.blueprintLoaded
      * @param {StagedFile[]}      opts.stagedFiles
      * @param {Date}              opts.createdAt
      * @param {Date}              opts.updatedAt
+     * @param {string|null}       opts.ownerId           - userId who created the session (audit only)
+     * @param {string[]}          opts.collaborators     - userIds who have staged at least one file
+     * @param {string}            opts.outputDir         - Server-side output directory for built files
+     * @param {boolean}           opts.compressionEnabled - Session-level compression, default true
+     * @param {string}            opts.sourceType        - 'datafile' | 'blueprint' | 'scratch'
+     * @param {string|null}       opts.sourceRef         - Datafile path or blueprint fingerprint
+     * @param {object|null}       opts.mostRecentBuild   - { type, timestamp, outputFiles } | null
      */
     constructor({
         sessionId,
@@ -51,7 +58,15 @@ class Session {
         blueprintLoaded = false,
         stagedFiles    = [],
         createdAt      = null,
-        updatedAt      = null
+        updatedAt      = null,
+        // Phase 3 additions
+        ownerId            = null,
+        collaborators      = [],
+        outputDir          = null,
+        compressionEnabled = true,
+        sourceType         = 'scratch',
+        sourceRef          = null,
+        mostRecentBuild    = null
     } = {}) {
         this.sessionId       = sessionId;
         this.label           = label;
@@ -62,6 +77,16 @@ class Session {
         this.blueprintLoaded = blueprintLoaded;
         this.createdAt       = createdAt instanceof Date ? createdAt : new Date();
         this.updatedAt       = updatedAt instanceof Date ? updatedAt : new Date();
+
+        // Phase 3 fields
+        this.ownerId            = ownerId;
+        this.collaborators      = Array.isArray(collaborators) ? collaborators : [];
+        // outputDir defaults to a subdirectory inside the working directory when not provided
+        this.outputDir          = outputDir || (workingDir ? path.join(workingDir, 'output') : null);
+        this.compressionEnabled = compressionEnabled !== false; // default true
+        this.sourceType         = sourceType || 'scratch';
+        this.sourceRef          = sourceRef || null;
+        this.mostRecentBuild    = mostRecentBuild || null;
 
         // Internal Map for O(1) dedup by targetName.
         // stagedFiles array on the constructor arg is only used when restoring from JSON.
@@ -203,7 +228,15 @@ class Session {
             stagedFiles:     this.stagedFiles.map(f => f.toJSON()),
             config:          this.config ? this.config.toJSON() : null,
             createdAt:       this.createdAt.toISOString(),
-            updatedAt:       this.updatedAt.toISOString()
+            updatedAt:       this.updatedAt.toISOString(),
+            // Phase 3 fields
+            ownerId:            this.ownerId,
+            collaborators:      this.collaborators,
+            outputDir:          this.outputDir,
+            compressionEnabled: this.compressionEnabled,
+            sourceType:         this.sourceType,
+            sourceRef:          this.sourceRef,
+            mostRecentBuild:    this.mostRecentBuild
         };
     }
 
@@ -224,7 +257,15 @@ class Session {
             blueprintLoaded:   obj.blueprintLoaded   || false,
             stagedFiles:     (obj.stagedFiles || []).map(f => StagedFile.fromJSON(f)),
             createdAt:       obj.createdAt ? new Date(obj.createdAt) : new Date(),
-            updatedAt:       obj.updatedAt ? new Date(obj.updatedAt) : new Date()
+            updatedAt:       obj.updatedAt ? new Date(obj.updatedAt) : new Date(),
+            // Phase 3 fields — safe defaults if absent (backwards compatibility)
+            ownerId:            obj.ownerId            || null,
+            collaborators:      obj.collaborators      || [],
+            outputDir:          obj.outputDir          || null,
+            compressionEnabled: obj.compressionEnabled !== false, // default true
+            sourceType:         obj.sourceType         || 'scratch',
+            sourceRef:          obj.sourceRef          || null,
+            mostRecentBuild:    obj.mostRecentBuild    || null
         });
     }
 
